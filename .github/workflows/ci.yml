@@ -26,8 +26,24 @@ jobs:
         working-directory: engine
 
   backend:
-    name: backend (pytest, mypy, ruff)
+    name: backend (pytest, mypy, ruff, alembic)
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: subscription_forecasting
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/subscription_forecasting
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -42,6 +58,10 @@ jobs:
       - run: uv run ruff check .
         working-directory: backend
       - run: uv run ruff format --check .
+        working-directory: backend
+      - run: uv run alembic upgrade head
+        working-directory: backend
+      - run: uv run alembic check
         working-directory: backend
 
   frontend:

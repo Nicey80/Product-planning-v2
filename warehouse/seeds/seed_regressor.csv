@@ -1,0 +1,7 @@
+period,node,order_channel,regressor_name,regressor_value
+1,N1,C1,marketing_spend,1000
+2,N1,C1,marketing_spend,1200
+3,N1,C1,marketing_spend,900
+1,N2,C1,marketing_spend,500
+2,N2,C1,marketing_spend,600
+3,N2,C1,marketing_spend,550
