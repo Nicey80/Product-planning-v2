@@ -1,0 +1,12 @@
+# Copy to ~/.dbt/profiles.yml (or set DBT_PROFILES_DIR=warehouse for a
+# project-local copy) and adjust for your environment. `dev` uses an
+# on-disk DuckDB file so the project runs and its tests pass with no
+# external warehouse -- swap in your real warehouse adapter/target for
+# staging and prod.
+warehouse:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "warehouse_dev.duckdb"
+      threads: 4

@@ -1,0 +1,69 @@
+version: 2
+
+models:
+  - name: stg_orders
+    description: >
+      Order-pipeline events (raised/closed/broken) per node x
+      order_channel x txn_type x period. Feeds fct_order_book (Identity 1).
+    columns:
+      - name: period
+        data_tests: [not_null]
+      - name: node
+        data_tests: [not_null]
+      - name: order_channel
+        data_tests: [not_null]
+      - name: txn_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["acquisition", "regrade", "churn"]
+      - name: raised
+        data_tests: [not_null]
+      - name: closed
+        data_tests: [not_null]
+      - name: broken
+        data_tests: [not_null]
+
+  - name: stg_base_movements
+    description: >
+      Closed-transaction and migration-overlay movements per node x period.
+      Feeds fct_base (Identity 2). Deliberately has no raised/open_orders
+      column (invariant 7).
+    columns:
+      - name: period
+        data_tests: [not_null]
+      - name: node
+        data_tests: [not_null]
+      - name: closed_acquisition
+        data_tests: [not_null]
+      - name: closed_resign_to
+        data_tests: [not_null]
+      - name: closed_resign_from
+        data_tests: [not_null]
+      - name: churn
+        data_tests: [not_null]
+      - name: migration_acq
+        data_tests: [not_null]
+      - name: migration_churn
+        data_tests: [not_null]
+
+  - name: stg_opening_base
+    description: Each node's base immediately before the first tracked period.
+    columns:
+      - name: node
+        data_tests: [not_null, unique]
+      - name: opening_base
+        data_tests: [not_null]
+
+  - name: stg_node_hierarchy
+    description: Product hierarchy dimension (variant -> product -> product_group).
+    columns:
+      - name: node
+        data_tests: [not_null, unique]
+
+  - name: stg_channel_hierarchy
+    description: Channel hierarchy dimension (sub_channel -> channel -> channel_group).
+    columns:
+      - name: order_channel
+        data_tests: [not_null, unique]
