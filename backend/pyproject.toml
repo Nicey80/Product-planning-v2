@@ -8,6 +8,9 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "pydantic>=2.8",
     "engine",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
 ]
 
 [dependency-groups]
@@ -39,6 +42,7 @@ python_version = "3.12"
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+extend-exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

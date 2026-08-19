@@ -16,7 +16,7 @@ Start here:
 | `engine/`   | Standalone forecasting library (Python 3.12, uv, `mypy --strict`) |
 | `backend/`  | FastAPI service, depends on `engine/` (Python 3.12, uv)           |
 | `frontend/` | React + TypeScript app (Vite)                                     |
-| `warehouse/`| dbt project restating the base/order-book identities over actuals |
+| `warehouse/`| dbt project (BigQuery in prod, DuckDB for local dev) restating the base/order-book identities over actuals |
 
 ## Getting started
 
@@ -26,6 +26,11 @@ cd engine && uv sync && uv run pytest
 
 # backend (depends on engine/ via a local uv path dependency)
 cd backend && uv sync && uv run pytest
+
+# backend persistence layer (Postgres via SQLAlchemy 2.0 + Alembic)
+createdb subscription_forecasting
+export DATABASE_URL=postgresql+psycopg:///subscription_forecasting
+uv run alembic upgrade head
 
 # frontend
 cd frontend && npm install && npm test

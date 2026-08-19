@@ -44,3 +44,179 @@ models:
     columns:
       - name: order_channel
         data_tests: [not_null, unique]
+
+  - name: agg_raised
+    description: Raised volume per node x order_channel x txn_type x period.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: order_channel
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_channel_dim')
+                field: sub_channel
+      - name: period
+        data_tests: [not_null]
+      - name: raised
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [node, order_channel, txn_type, period]
+
+  - name: agg_closed
+    description: Closed volume per node x order_channel x txn_type x period.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: order_channel
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_channel_dim')
+                field: sub_channel
+      - name: period
+        data_tests: [not_null]
+      - name: closed
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [node, order_channel, txn_type, period]
+
+  - name: agg_book
+    description: Identity 1 (order book) restated over actuals from the v2 event pipeline.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: order_channel
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_channel_dim')
+                field: sub_channel
+      - name: open_orders
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [node, order_channel, txn_type, period]
+
+  - name: agg_order_cohort
+    description: Survival triangle cells plus cohort size, for reporting.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: order_channel
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_channel_dim')
+                field: sub_channel
+      - name: cohort_size
+        data_tests: [not_null]
+
+  - name: agg_base_cohort
+    description: Identity 2 (base) restated over actuals from the v2 event pipeline.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: closing_base
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [node, period]
+
+  - name: agg_rate
+    description: Empirical closure/breakage rates per raise cohort.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: order_channel
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_channel_dim')
+                field: sub_channel
+      - name: raised
+        data_tests: [not_null]
+
+  - name: fact_regressor
+    description: External regressor values (e.g. marketing spend) per node x order_channel x period.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: order_channel
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_channel_dim')
+                field: sub_channel
+      - name: period
+        data_tests: [not_null]
+      - name: regressor_name
+        data_tests: [not_null]
+
+  - name: fact_reconciliation_residual
+    description: >
+      Drift between computed Identity 1/Identity 2 values and
+      source-system snapshots (residual = snapshot - computed).
+    columns:
+      - name: identity
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["book", "base"]
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: residual
+        data_tests: [not_null]

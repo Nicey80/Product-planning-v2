@@ -1,8 +1,9 @@
 # Copy to ~/.dbt/profiles.yml (or set DBT_PROFILES_DIR=warehouse for a
 # project-local copy) and adjust for your environment. `dev` uses an
 # on-disk DuckDB file so the project runs and its tests pass with no
-# external warehouse -- swap in your real warehouse adapter/target for
-# staging and prod.
+# external warehouse. `ci`/`prod` target BigQuery -- the project's actual
+# production warehouse -- via a service account; swap in your own
+# project/dataset/keyfile.
 warehouse:
   target: dev
   outputs:
@@ -10,3 +11,25 @@ warehouse:
       type: duckdb
       path: "warehouse_dev.duckdb"
       threads: 4
+
+    ci:
+      type: bigquery
+      method: service-account
+      project: "your-gcp-project"
+      dataset: "warehouse_ci"
+      keyfile: "/path/to/ci-service-account.json"
+      location: "US"
+      threads: 4
+      job_execution_timeout_seconds: 300
+      job_retries: 1
+
+    prod:
+      type: bigquery
+      method: service-account
+      project: "your-gcp-project"
+      dataset: "warehouse"
+      keyfile: "/path/to/prod-service-account.json"
+      location: "US"
+      threads: 8
+      job_execution_timeout_seconds: 300
+      job_retries: 1

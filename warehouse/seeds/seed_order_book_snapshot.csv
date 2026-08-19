@@ -1,0 +1,7 @@
+node,order_channel,txn_type,period,open_orders_count
+N1,C1,acquisition,1,100
+N1,C1,acquisition,2,60
+N1,C1,acquisition,3,0
+N2,C1,acquisition,1,40
+N2,C1,acquisition,2,5
+N2,C1,acquisition,3,0

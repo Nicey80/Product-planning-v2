@@ -67,3 +67,149 @@ models:
     columns:
       - name: order_channel
         data_tests: [not_null, unique]
+
+  - name: stg_order_event
+    description: >
+      Event-level order-pipeline facts: one row per (raise cohort,
+      resolution period, event_type) observation, carrying both
+      raise_period and event_period so age can be derived. Feeds
+      int_order_cohort and int_transitions.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: order_channel
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_channel_dim')
+                field: sub_channel
+      - name: txn_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["acquisition", "regrade", "churn"]
+      - name: raise_period
+        data_tests: [not_null]
+      - name: event_period
+        data_tests: [not_null]
+      - name: event_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["raised", "closed", "broken"]
+      - name: order_count
+        data_tests: [not_null]
+
+  - name: stg_subscription_event
+    description: >
+      Event-level base-movement facts (closed transactions + migration
+      overlays). `order_id` links the resign_from/resign_to legs of a
+      regrade; null for migration_acq/migration_churn (invariant 8).
+      Feeds int_cohort_base and int_amendments.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: period
+        data_tests: [not_null]
+      - name: event_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  [
+                    "acquisition",
+                    "resign_to",
+                    "resign_from",
+                    "churn",
+                    "migration_acq",
+                    "migration_churn",
+                  ]
+      - name: subscriber_count
+        data_tests: [not_null]
+
+  - name: stg_base_snapshot
+    description: Source-system snapshot of closing base per node x period, for reconciliation.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: period
+        data_tests: [not_null]
+      - name: base_count
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [node, period]
+
+  - name: stg_order_book_snapshot
+    description: >
+      Source-system snapshot of open_orders per node x order_channel x
+      txn_type x period, for reconciliation.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: order_channel
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_channel_dim')
+                field: sub_channel
+      - name: period
+        data_tests: [not_null]
+      - name: open_orders_count
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [node, order_channel, txn_type, period]
+
+  - name: stg_product_dim
+    description: >
+      Product hierarchy dimension (variant/node -> product -> product_group),
+      as reported by the source system. One of the two dimensions
+      referential-integrity tests point at.
+    columns:
+      - name: node
+        data_tests: [not_null, unique]
+      - name: product
+        data_tests: [not_null]
+      - name: product_group
+        data_tests: [not_null]
+
+  - name: stg_channel_dim
+    description: >
+      Channel hierarchy dimension (sub_channel -> channel -> channel_group),
+      as reported by the source system. One of the two dimensions
+      referential-integrity tests point at.
+    columns:
+      - name: sub_channel
+        data_tests: [not_null, unique]
+      - name: channel
+        data_tests: [not_null]
+      - name: channel_group
+        data_tests: [not_null]

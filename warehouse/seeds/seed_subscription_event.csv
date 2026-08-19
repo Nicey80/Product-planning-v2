@@ -1,0 +1,10 @@
+order_id,node,channel,period,event_type,subscriber_count
+,N1,C1,1,migration_churn,15
+,N1,C1,2,acquisition,80
+,N1,C1,3,acquisition,60
+R1,N1,C1,3,resign_from,10
+,N1,C1,3,churn,5
+,N2,C1,1,migration_acq,15
+,N2,C1,2,acquisition,30
+,N2,C1,3,acquisition,5
+R1,N2,C1,3,resign_to,10

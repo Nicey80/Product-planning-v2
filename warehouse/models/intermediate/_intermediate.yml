@@ -1,0 +1,117 @@
+version: 2
+
+models:
+  - name: int_order_cohort
+    description: >
+      The survival triangle: raise_period x age x node x order_channel x
+      txn_type x outcome (closed/broken/open). Built incremental.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: order_channel
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_channel_dim')
+                field: sub_channel
+      - name: txn_type
+        data_tests: [not_null]
+      - name: raise_period
+        data_tests: [not_null]
+      - name: age
+        data_tests: [not_null]
+      - name: outcome
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["closed", "broken", "open"]
+      - name: count
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              [raise_period, age, node, order_channel, txn_type, outcome]
+
+  - name: int_transitions
+    description: >
+      One row per raise-cohort resolution event (closed/broken), with the
+      raise-to-resolution lag -- the raw input to an empirical closure
+      kernel estimate.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: order_channel
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_channel_dim')
+                field: sub_channel
+      - name: raise_period
+        data_tests: [not_null]
+      - name: resolution_period
+        data_tests: [not_null]
+      - name: lag
+        data_tests: [not_null]
+      - name: transition_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["closed", "broken"]
+      - name: count
+        data_tests: [not_null]
+
+  - name: int_cohort_base
+    description: Base-movement facts aggregated from stg_subscription_event to period grain.
+    columns:
+      - name: node
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: period
+        data_tests: [not_null]
+    data_tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [node, period]
+
+  - name: int_amendments
+    description: >
+      Regrade amendments: node_raised -> node_closed, paired by order_id
+      from the resign_from/resign_to legs of the same closed order.
+    columns:
+      - name: node_raised
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: node_closed
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_product_dim')
+                field: node
+      - name: period
+        data_tests: [not_null]
+      - name: count
+        data_tests: [not_null]
