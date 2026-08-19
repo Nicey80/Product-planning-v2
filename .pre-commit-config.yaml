@@ -1,0 +1,46 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check (engine/, backend/)
+        language: system
+        entry: bash -c 'for d in engine backend; do (cd "$d" && uv run ruff check .) || exit 1; done'
+        pass_filenames: false
+        files: ^(engine|backend)/.*\.py$
+
+      - id: ruff-format
+        name: ruff format --check (engine/, backend/)
+        language: system
+        entry: bash -c 'for d in engine backend; do (cd "$d" && uv run ruff format --check .) || exit 1; done'
+        pass_filenames: false
+        files: ^(engine|backend)/.*\.py$
+
+      - id: mypy-engine-strict
+        name: mypy --strict (engine/)
+        language: system
+        entry: bash -c 'cd engine && uv run mypy'
+        pass_filenames: false
+        files: ^engine/.*\.py$
+
+      - id: eslint-frontend
+        name: eslint (frontend/)
+        language: system
+        entry: bash -c 'cd frontend && npm run lint'
+        pass_filenames: false
+        files: ^frontend/.*\.(ts|tsx)$
+
+      - id: prettier-frontend
+        name: prettier --check (frontend/)
+        language: system
+        entry: bash -c 'cd frontend && npx prettier --check .'
+        pass_filenames: false
+        files: ^frontend/.*\.(ts|tsx|css|json|md)$

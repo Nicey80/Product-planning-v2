@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  engine:
+    name: engine (pytest, hypothesis, mypy --strict, ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - run: uv sync
+        working-directory: engine
+      - run: uv run pytest
+        working-directory: engine
+      - run: uv run mypy
+        working-directory: engine
+      - run: uv run ruff check .
+        working-directory: engine
+      - run: uv run ruff format --check .
+        working-directory: engine
+
+  backend:
+    name: backend (pytest, mypy, ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - run: uv sync
+        working-directory: backend
+      - run: uv run pytest
+        working-directory: backend
+      - run: uv run mypy
+        working-directory: backend
+      - run: uv run ruff check .
+        working-directory: backend
+      - run: uv run ruff format --check .
+        working-directory: backend
+
+  frontend:
+    name: frontend (vitest, eslint, prettier, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run lint
+        working-directory: frontend
+      - run: npm run format:check
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+  warehouse:
+    name: warehouse (dbt build against local DuckDB)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - run: uv sync
+        working-directory: warehouse
+      - run: cp profiles.yml.example profiles.yml
+        working-directory: warehouse
+      - run: uv run dbt build --profiles-dir .
+        working-directory: warehouse

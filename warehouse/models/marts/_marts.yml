@@ -1,0 +1,46 @@
+version: 2
+
+models:
+  - name: fct_order_book
+    description: Identity 1 (order book) restated over actuals, per node x order_channel x txn_type x period.
+    columns:
+      - name: node
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_node')
+                field: node
+      - name: order_channel
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_channel')
+                field: order_channel
+      - name: open_orders
+        data_tests:
+          - not_null
+
+  - name: fct_base
+    description: Identity 2 (base) restated over actuals, per node x period.
+    columns:
+      - name: node
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_node')
+                field: node
+      - name: closing_base
+        data_tests:
+          - not_null
+
+  - name: dim_node
+    description: Product hierarchy dimension (variant -> product -> product_group).
+    columns:
+      - name: node
+        data_tests: [not_null, unique]
+
+  - name: dim_channel
+    description: Channel hierarchy dimension (sub_channel -> channel -> channel_group).
+    columns:
+      - name: order_channel
+        data_tests: [not_null, unique]

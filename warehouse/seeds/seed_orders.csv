@@ -1,0 +1,7 @@
+period,node,order_channel,txn_type,raised,closed,broken
+1,N1,C1,acquisition,100,0,0
+2,N1,C1,acquisition,50,80,10
+3,N1,C1,acquisition,0,60,0
+1,N2,C1,acquisition,40,0,0
+2,N2,C1,acquisition,0,30,5
+3,N2,C1,acquisition,0,5,0
