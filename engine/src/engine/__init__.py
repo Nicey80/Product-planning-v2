@@ -14,6 +14,15 @@ from engine.base import (
     roll_forward_base,
 )
 from engine.domain import ChannelId, KernelSegment, NodeId, Period, TxnType
+from engine.estimate import (
+    OrderObservation,
+    estimate_churn_hazard,
+    estimate_closure_kernel,
+    estimate_regrade_transition,
+    naive_kernel_estimate,
+    observations_from_order_events,
+    raised_by_cohort_from_events,
+)
 from engine.hierarchy import cross_margin_total, roll_up, sum_axis
 from engine.kernel import ClosureResult, apply_closure_kernel
 from engine.run import ForecastRun
@@ -27,13 +36,20 @@ __all__ = [
     "KernelSegment",
     "MigrationPair",
     "NodeId",
+    "OrderObservation",
     "Period",
     "RegradePair",
     "TxnType",
     "apply_closure_kernel",
     "cross_margin_total",
+    "estimate_churn_hazard",
+    "estimate_closure_kernel",
+    "estimate_regrade_transition",
     "merge_movements",
     "migration_pair_movements",
+    "naive_kernel_estimate",
+    "observations_from_order_events",
+    "raised_by_cohort_from_events",
     "regrade_pair_movements",
     "roll_forward_base",
     "roll_up",
