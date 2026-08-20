@@ -42,7 +42,10 @@ jobs:
 
   comment-preview-url:
     name: comment preview url
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    # Only once preview actually deployed something -- deploy-env.yml
+    # skips its deploy steps (leaving these outputs empty) when the
+    # "preview" GitHub Environment isn't configured yet.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.preview.outputs.api_url != ''
     needs: preview
     runs-on: ubuntu-latest
     permissions:

@@ -54,21 +54,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # infra/ hasn't necessarily been applied for this environment yet
+      # (chicken-and-egg: the GitHub Environment variables below come
+      # from `terraform output`, see infra/README.md "Bootstrap" step
+      # 5). Skip the rest of this job instead of failing the whole
+      # workflow -- deploy jobs shouldn't block CI/merges before an
+      # environment has been provisioned.
+      - name: Check environment is configured
+        id: check
+        run: |
+          if [ -z "${{ vars.GCP_PROJECT }}" ] || [ -z "${{ vars.WIF_PROVIDER }}" ] || [ -z "${{ vars.DEPLOY_SA_EMAIL }}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::GitHub Environment '${{ inputs.environment }}' is missing GCP_PROJECT/WIF_PROVIDER/DEPLOY_SA_EMAIL -- skipping deploy. Run 'terraform apply' for this environment and wire its outputs into Settings -> Environments -> ${{ inputs.environment }} -> Variables (see infra/README.md 'Bootstrap' step 5)."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # Workload Identity Federation -- no service account key ever
       # touches this repo. Trust is scoped to this repo (and this
       # environment's own project) in infra/modules/app/wif.tf.
       - uses: google-github-actions/auth@v2
+        if: steps.check.outputs.configured == 'true'
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.DEPLOY_SA_EMAIL }}
 
       - uses: google-github-actions/setup-gcloud@v2
+        if: steps.check.outputs.configured == 'true'
 
       - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.configured == 'true'
 
       - run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+        if: steps.check.outputs.configured == 'true'
 
       - name: Build & push api image
+        if: steps.check.outputs.configured == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -79,6 +100,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=backend
 
       - name: Build & push frontend image
+        if: steps.check.outputs.configured == 'true'
         uses: docker/build-push-action@v6
         with:
           context: frontend
@@ -92,7 +114,7 @@ jobs:
       # push would race across concurrently-open PRs. Staging/prod each
       # deploy from a single serialized branch (main / a version tag).
       - name: Run database migrations
-        if: ${{ !inputs.no_traffic }}
+        if: steps.check.outputs.configured == 'true' && !inputs.no_traffic
         run: |
           gcloud run jobs execute migrate \
             --project="${PROJECT}" \
@@ -103,6 +125,7 @@ jobs:
 
       - id: deploy-api
         name: Deploy api
+        if: steps.check.outputs.configured == 'true'
         run: |
           set -euo pipefail
           args=(--project="${PROJECT}" --region="${REGION}"
@@ -124,6 +147,7 @@ jobs:
 
       - id: deploy-frontend
         name: Deploy frontend
+        if: steps.check.outputs.configured == 'true'
         run: |
           set -euo pipefail
           args=(--project="${PROJECT}" --region="${REGION}"
