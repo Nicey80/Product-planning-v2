@@ -11,6 +11,17 @@ def test_healthz() -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_readyz_reports_db_connectivity() -> None:
+    response = client.get("/readyz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+
+def test_response_carries_request_id() -> None:
+    response = client.get("/healthz")
+    assert "x-request-id" in response.headers
+
+
 def test_validate_kernel_accepts_valid_segment() -> None:
     response = client.post(
         "/api/v1/kernel/validate",

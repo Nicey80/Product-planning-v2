@@ -1,0 +1,143 @@
+name: Deploy environment
+
+# Reusable: builds and pushes the api/frontend images and deploys them to
+# one environment. Called three times by deploy.yml (preview/staging/
+# prod) with different inputs.
+#
+# GCP_PROJECT, GCP_REGION, ARTIFACT_REGISTRY_REPO, WIF_PROVIDER and
+# DEPLOY_SA_EMAIL are read from `vars` scoped to the *GitHub Environment*
+# named by `inputs.environment` (Settings -> Environments -> preview/
+# staging/production -> Variables), not repo-level vars -- each
+# environment is a separate GCP project with its own Workload Identity
+# Federation pool and deploy service account (see infra/README.md for
+# the one-time wiring from `terraform output` into those environments).
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub environment name (gates prod behind manual approval)
+        required: true
+        type: string
+      no_traffic:
+        description: Deploy as a tagged, 0%-traffic revision (PR previews)
+        required: false
+        type: boolean
+        default: false
+      revision_tag:
+        description: Traffic tag for the revision, e.g. pr-123 (required when no_traffic is true)
+        required: false
+        type: string
+        default: ""
+    outputs:
+      api_url:
+        value: ${{ jobs.deploy.outputs.api_url }}
+      frontend_url:
+        value: ${{ jobs.deploy.outputs.frontend_url }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: deploy (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      api_url: ${{ steps.deploy-api.outputs.url }}
+      frontend_url: ${{ steps.deploy-frontend.outputs.url }}
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT }}
+      REGION: ${{ vars.GCP_REGION }}
+      REGISTRY: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/${{ vars.ARTIFACT_REGISTRY_REPO }}
+      IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Workload Identity Federation -- no service account key ever
+      # touches this repo. Trust is scoped to this repo (and this
+      # environment's own project) in infra/modules/app/wif.tf.
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA_EMAIL }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - name: Build & push api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/api:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: true
+          tags: ${{ env.REGISTRY }}/frontend:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+      # Skipped for PR previews: running Alembic against dev on every PR
+      # push would race across concurrently-open PRs. Staging/prod each
+      # deploy from a single serialized branch (main / a version tag).
+      - name: Run database migrations
+        if: ${{ !inputs.no_traffic }}
+        run: |
+          gcloud run jobs execute migrate \
+            --project="${PROJECT}" \
+            --region="${REGION}" \
+            --image="${REGISTRY}/api:${IMAGE_TAG}" \
+            --update-env-vars="GIT_SHA=${{ github.sha }}" \
+            --wait
+
+      - id: deploy-api
+        name: Deploy api
+        run: |
+          set -euo pipefail
+          args=(--project="${PROJECT}" --region="${REGION}"
+                --image="${REGISTRY}/api:${IMAGE_TAG}"
+                --update-env-vars="GIT_SHA=${{ github.sha }},ENVIRONMENT=${{ inputs.environment }}"
+                --quiet)
+          if [ -n "${{ inputs.revision_tag }}" ]; then
+            args+=(--tag="${{ inputs.revision_tag }}" --no-traffic)
+          fi
+          gcloud run deploy api "${args[@]}"
+          if [ -n "${{ inputs.revision_tag }}" ]; then
+            url=$(gcloud run services describe api --project="${PROJECT}" --region="${REGION}" \
+                  --format="value(status.traffic.filter('tag:${{ inputs.revision_tag }}').url)")
+          else
+            url=$(gcloud run services describe api --project="${PROJECT}" --region="${REGION}" \
+                  --format="value(status.url)")
+          fi
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+
+      - id: deploy-frontend
+        name: Deploy frontend
+        run: |
+          set -euo pipefail
+          args=(--project="${PROJECT}" --region="${REGION}"
+                --image="${REGISTRY}/frontend:${IMAGE_TAG}"
+                --quiet)
+          if [ -n "${{ inputs.revision_tag }}" ]; then
+            args+=(--tag="${{ inputs.revision_tag }}" --no-traffic)
+          fi
+          gcloud run deploy frontend "${args[@]}"
+          if [ -n "${{ inputs.revision_tag }}" ]; then
+            url=$(gcloud run services describe frontend --project="${PROJECT}" --region="${REGION}" \
+                  --format="value(status.traffic.filter('tag:${{ inputs.revision_tag }}').url)")
+          else
+            url=$(gcloud run services describe frontend --project="${PROJECT}" --region="${REGION}" \
+                  --format="value(status.url)")
+          fi
+          echo "url=${url}" >> "$GITHUB_OUTPUT"

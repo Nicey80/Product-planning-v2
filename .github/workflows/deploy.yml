@@ -1,0 +1,104 @@
+name: Deploy
+
+# Entry point: runs the full ci.yml stage pipeline (lint -> ... -> build)
+# and, only once it's green, deploys:
+#   - pull_request        -> ephemeral, 0%-traffic preview revision, tagged
+#                             pr-<number>, URL posted/updated as a PR comment
+#   - push to main         -> staging
+#   - push of a `v*` tag   -> production, gated on manual approval via the
+#                             "production" GitHub Environment's required
+#                             reviewers (configure that in repo settings --
+#                             see infra/README.md)
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+concurrency:
+  group: deploy-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: ci
+    uses: ./.github/workflows/ci.yml
+
+  preview:
+    name: preview
+    # Skip forks: WIF's trust policy is scoped to this repo (see
+    # infra/modules/app/wif.tf), so a fork's OIDC token wouldn't be
+    # accepted anyway -- but don't even try to hand it real cloud access.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: ci
+    uses: ./.github/workflows/deploy-env.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      environment: preview
+      no_traffic: true
+      revision_tag: pr-${{ github.event.pull_request.number }}
+
+  comment-preview-url:
+    name: comment preview url
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: preview
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = "<!-- deploy-preview-comment -->";
+            const body = [
+              marker,
+              "**Preview deployed for this PR**",
+              "",
+              `- Frontend: ${{ needs.preview.outputs.frontend_url }}`,
+              `- API: ${{ needs.preview.outputs.api_url }}`,
+            ].join("\n");
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find((c) => c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+  staging:
+    name: staging
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: ci
+    uses: ./.github/workflows/deploy-env.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      environment: staging
+
+  prod:
+    name: prod
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: ci
+    uses: ./.github/workflows/deploy-env.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      environment: production

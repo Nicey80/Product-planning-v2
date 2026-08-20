@@ -22,6 +22,10 @@ packages = ["src/engine"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "unit: fast, single-case deterministic tests",
+    "property: hypothesis-driven property-based tests (the invariants)",
+]
 
 [tool.mypy]
 strict = true

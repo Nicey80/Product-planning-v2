@@ -1,0 +1,16 @@
+# Applies to the repo-root build context (backend/Dockerfile).
+.git
+**/__pycache__
+**/*.pyc
+**/.venv
+**/node_modules
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.hypothesis
+frontend/dist
+warehouse/target
+warehouse/dbt_packages
+warehouse/*.duckdb
+infra/**/.terraform
+infra/**/*.tfstate*

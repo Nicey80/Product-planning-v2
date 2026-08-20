@@ -5,6 +5,11 @@ CLAUDE.md: immutable once created; a correction is a new run, never a
 mutation). The schema does not enforce immutability itself -- that is
 business logic, out of scope here -- but nothing on this table is
 designed to be updated after insert.
+
+`engine_version`, `config_hash`, `git_sha`, and `input_data_versions`
+are the run-lineage fields: together with `kernel_version` and
+`book_snapshot_date` they let any historical run be reproduced exactly
+(pin the same engine release, config, inputs, and code at that git SHA).
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.db.base import Base
@@ -48,6 +53,10 @@ class ForecastRun(Base):
         pg_enum(PeriodGrain, name="period_grain"), nullable=False
     )
     random_seed: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    engine_version: Mapped[str] = mapped_column(String, nullable=False)
+    config_hash: Mapped[str] = mapped_column(String, nullable=False)
+    git_sha: Mapped[str] = mapped_column(String, nullable=False)
+    input_data_versions: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False)
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
