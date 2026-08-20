@@ -1,32 +1,85 @@
 name: CI
 
+# Reusable workflow only -- deploy.yml is the entry point that triggers
+# it on every push/pull_request and chains the deploy stage after it.
+# (Also invocable by hand for a one-off validation run.)
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
+  workflow_dispatch:
 
+# Stage order mirrors the pipeline contract: lint -> typecheck -> unit ->
+# property tests -> golden-run snapshot -> dbt tests -> build. Each job
+# `needs` the previous stage so the pipeline fails fast and the Actions
+# UI shows the stages in order.
 jobs:
-  engine:
-    name: engine (pytest, hypothesis, mypy --strict, ruff)
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
         with:
           version: "latest"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
       - run: uv sync
-        working-directory: engine
-      - run: uv run pytest
-        working-directory: engine
-      - run: uv run mypy
         working-directory: engine
       - run: uv run ruff check .
         working-directory: engine
       - run: uv run ruff format --check .
         working-directory: engine
 
-  backend:
-    name: backend (pytest, mypy, ruff, alembic)
+      - run: uv sync
+        working-directory: backend
+      - run: uv run ruff check .
+        working-directory: backend
+      - run: uv run ruff format --check .
+        working-directory: backend
+
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run lint
+        working-directory: frontend
+      - run: npm run format:check
+        working-directory: frontend
+
+  typecheck:
+    name: typecheck
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: uv sync
+        working-directory: engine
+      - run: uv run mypy
+        working-directory: engine
+
+      - run: uv sync
+        working-directory: backend
+      - run: uv run mypy
+        working-directory: backend
+
+      - run: npm ci
+        working-directory: frontend
+      - run: npx tsc -b
+        working-directory: frontend
+
+  unit:
+    name: unit
+    needs: typecheck
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -49,44 +102,62 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           version: "latest"
-      - run: uv sync
-        working-directory: backend
-      - run: uv run pytest
-        working-directory: backend
-      - run: uv run mypy
-        working-directory: backend
-      - run: uv run ruff check .
-        working-directory: backend
-      - run: uv run ruff format --check .
-        working-directory: backend
-      - run: uv run alembic upgrade head
-        working-directory: backend
-      - run: uv run alembic check
-        working-directory: backend
-
-  frontend:
-    name: frontend (vitest, eslint, prettier, build)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
+
+      - run: uv sync
+        working-directory: engine
+      - run: uv run pytest -m unit --ignore=tests/test_golden_run.py
+        working-directory: engine
+
+      - run: uv sync
+        working-directory: backend
+      - run: uv run alembic upgrade head
+        working-directory: backend
+      - run: uv run alembic check
+        working-directory: backend
+      - run: uv run pytest
+        working-directory: backend
+
       - run: npm ci
-        working-directory: frontend
-      - run: npm run lint
-        working-directory: frontend
-      - run: npm run format:check
         working-directory: frontend
       - run: npm test
         working-directory: frontend
-      - run: npm run build
-        working-directory: frontend
 
-  warehouse:
-    name: warehouse (dbt build against local DuckDB)
+  property:
+    name: property tests
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - run: uv sync
+        working-directory: engine
+      - run: uv run pytest -m property
+        working-directory: engine
+
+  golden-run-snapshot:
+    name: golden-run snapshot
+    needs: property
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+      - run: uv sync
+        working-directory: engine
+      - run: uv run pytest tests/test_golden_run.py
+        working-directory: engine
+
+  dbt-tests:
+    name: dbt tests
+    needs: golden-run-snapshot
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -99,3 +170,37 @@ jobs:
         working-directory: warehouse
       - run: uv run dbt build --profiles-dir .
         working-directory: warehouse
+
+  build:
+    name: build
+    needs: dbt-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: false
+          tags: backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: false
+          tags: frontend:ci
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend

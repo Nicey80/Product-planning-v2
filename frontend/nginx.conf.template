@@ -1,0 +1,18 @@
+# Templated by the nginx image's docker-entrypoint (envsubst over
+# $PORT only -- nginx variables like $uri are untouched since they are
+# not exported as environment variables). See Dockerfile.
+server {
+    listen ${PORT};
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location /healthz {
+        default_type text/plain;
+        return 200 "ok";
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

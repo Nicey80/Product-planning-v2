@@ -1,0 +1,6 @@
+.venv
+target
+dbt_packages
+*.duckdb
+profiles.yml
+.git

@@ -1,0 +1,74 @@
+name: product-planning-v2
+
+# Local dev stack: Postgres, the API (with live reload), the frontend dev
+# server, and an on-demand dbt-against-DuckDB service so nobody needs
+# BigQuery access to run `dbt build` locally. See README.md "Local
+# development with Docker".
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: forecasting
+      POSTGRES_PASSWORD: forecasting
+      POSTGRES_DB: subscription_forecasting
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forecasting -d subscription_forecasting"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn backend.main:app --host 0.0.0.0 --port 8080 --reload"
+    environment:
+      DATABASE_URL: postgresql+psycopg://forecasting:forecasting@postgres:5432/subscription_forecasting
+      ENVIRONMENT: local
+    ports:
+      - "8000:8080"
+    volumes:
+      - ./backend/src:/app/backend/src
+      - ./backend/tests:/app/backend/tests
+      - ./backend/alembic:/app/backend/alembic
+      - ./engine/src:/app/engine/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    image: node:22-slim
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      - api
+
+  # On-demand only (not started by `docker compose up`): run dbt against a
+  # local DuckDB file, no BigQuery credentials required.
+  #   cp warehouse/profiles.yml.example warehouse/profiles.yml   # once
+  #   docker compose run --rm dbt build
+  #   docker compose run --rm dbt test
+  dbt:
+    build:
+      context: warehouse
+      dockerfile: Dockerfile
+    profiles: ["tools"]
+    volumes:
+      - ./warehouse:/app
+
+volumes:
+  postgres_data:
+  frontend_node_modules:
