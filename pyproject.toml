@@ -8,7 +8,7 @@ dependencies = ["engine"]
 members = ["engine", "backend"]
 
 [tool.uv.sources]
-forecast-engine = { workspace = true }
+engine = { workspace = true }
 
 [dependency-groups]
 dev = ["pytest>=8.3", "pytest-xdist", "pytest-cov", "hypothesis>=6.100", "ruff", "mypy"]
