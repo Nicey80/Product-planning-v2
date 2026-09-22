@@ -26,7 +26,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-engine = { path = "../engine", editable = true }
+engine = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
