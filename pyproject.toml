@@ -1,0 +1,14 @@
+[project]
+name = "forecast-workspace"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["engine"]
+
+[tool.uv.workspace]
+members = ["engine", "backend"]
+
+[tool.uv.sources]
+forecast-engine = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-xdist", "pytest-cov", "hypothesis>=6.100", "ruff", "mypy"]
