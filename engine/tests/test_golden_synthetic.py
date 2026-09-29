@@ -30,14 +30,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from engine.domain import ChannelId, NodeId, Period, TxnType
-from engine.testing.synthetic import (
-    BaseSnapshot,
-    OrderBookSnapshot,
-    OrderEvent,
-    SubscriptionEvent,
-    SyntheticPortfolio,
-)
+from engine.testing.serialize import deserialize_portfolio
 from golden_synthetic_scenario import PINNED_PARAMS, build_dataset, run_forecast, serialize_dataset
 
 _GOLDEN_DIR = Path(__file__).parent / "golden"
@@ -61,70 +54,6 @@ def _to_decimals(value: Any) -> Any:
     return value
 
 
-def _portfolio_from_dataset_json(dataset: dict[str, Any]) -> SyntheticPortfolio:
-    order_events = tuple(
-        OrderEvent(
-            node=NodeId(row["node"]),
-            order_channel=ChannelId(row["order_channel"]),
-            txn_type=TxnType(row["txn_type"]),
-            raise_period=Period(int(row["raise_period"])),
-            event_type=row["event_type"],
-            event_period=Period(int(row["event_period"])),
-            count=Decimal(row["count"]),
-            to_node=NodeId(row["to_node"]) if row["to_node"] is not None else None,
-        )
-        for row in dataset["raw_order_event"]
-    )
-    subscription_events = tuple(
-        SubscriptionEvent(
-            subscriber_id=row["subscriber_id"],
-            event_type=row["event_type"],
-            period=Period(int(row["period"])),
-            node=NodeId(row["node"]),
-            from_node=NodeId(row["from_node"]) if row["from_node"] is not None else None,
-            acquisition_channel=ChannelId(row["acquisition_channel"]),
-            contract_term=row["contract_term"],
-            tenure=row["tenure"],
-        )
-        for row in dataset["raw_subscription_event"]
-    )
-    base_snapshot = tuple(
-        BaseSnapshot(
-            node=NodeId(row["node"]),
-            period=Period(int(row["period"])),
-            opening_base=Decimal(row["opening_base"]),
-            closing_base=Decimal(row["closing_base"]),
-            closed_acquisition=Decimal(row["closed_acquisition"]),
-            closed_resign_to=Decimal(row["closed_resign_to"]),
-            closed_resign_from=Decimal(row["closed_resign_from"]),
-            churn=Decimal(row["churn"]),
-            migration_acq=Decimal(row["migration_acq"]),
-            migration_churn=Decimal(row["migration_churn"]),
-        )
-        for row in dataset["raw_base_snapshot"]
-    )
-    order_book_snapshot = tuple(
-        OrderBookSnapshot(
-            node=NodeId(row["node"]),
-            order_channel=ChannelId(row["order_channel"]),
-            txn_type=TxnType(row["txn_type"]),
-            period=Period(int(row["period"])),
-            raised=Decimal(row["raised"]),
-            closed=Decimal(row["closed"]),
-            broken=Decimal(row["broken"]),
-            open_orders=Decimal(row["open_orders"]),
-        )
-        for row in dataset["raw_order_book_snapshot"]
-    )
-    return SyntheticPortfolio(
-        params=PINNED_PARAMS,
-        raw_order_event=order_events,
-        raw_subscription_event=subscription_events,
-        raw_base_snapshot=base_snapshot,
-        raw_order_book_snapshot=order_book_snapshot,
-    )
-
-
 def test_synthetic_dataset_matches_committed_snapshot() -> None:
     actual = serialize_dataset(build_dataset())
     expected = json.loads(_DATASET_PATH.read_text())
@@ -140,7 +69,7 @@ def test_synthetic_dataset_matches_committed_snapshot() -> None:
 
 def test_forecast_matches_committed_snapshot() -> None:
     committed_dataset = json.loads(_DATASET_PATH.read_text())
-    portfolio = _portfolio_from_dataset_json(committed_dataset)
+    portfolio = deserialize_portfolio(committed_dataset, params=PINNED_PARAMS)
 
     actual = run_forecast(portfolio)
     expected = json.loads(_FORECAST_PATH.read_text())

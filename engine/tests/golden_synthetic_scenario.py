@@ -68,6 +68,7 @@ from engine.estimate import (
 )
 from engine.hierarchy import roll_up
 from engine.kernel import apply_closure_kernel
+from engine.testing.serialize import serialize_portfolio
 from engine.testing.synthetic import (
     ClosureProfile,
     SyntheticParams,
@@ -255,68 +256,8 @@ def run_forecast(portfolio: SyntheticPortfolio) -> dict[str, Any]:
     }
 
 
-def _serialize_order_event(e: Any) -> dict[str, Any]:
-    return {
-        "node": e.node,
-        "order_channel": e.order_channel,
-        "txn_type": str(e.txn_type),
-        "raise_period": str(e.raise_period),
-        "event_type": e.event_type,
-        "event_period": str(e.event_period),
-        "count": str(e.count),
-        "to_node": e.to_node,
-    }
-
-
-def _serialize_subscription_event(e: Any) -> dict[str, Any]:
-    return {
-        "subscriber_id": e.subscriber_id,
-        "event_type": e.event_type,
-        "period": str(e.period),
-        "node": e.node,
-        "from_node": e.from_node,
-        "acquisition_channel": e.acquisition_channel,
-        "contract_term": e.contract_term,
-        "tenure": e.tenure,
-    }
-
-
-def _serialize_base_snapshot(r: Any) -> dict[str, Any]:
-    return {
-        "node": r.node,
-        "period": str(r.period),
-        "opening_base": str(r.opening_base),
-        "closing_base": str(r.closing_base),
-        "closed_acquisition": str(r.closed_acquisition),
-        "closed_resign_to": str(r.closed_resign_to),
-        "closed_resign_from": str(r.closed_resign_from),
-        "churn": str(r.churn),
-        "migration_acq": str(r.migration_acq),
-        "migration_churn": str(r.migration_churn),
-    }
-
-
-def _serialize_order_book_snapshot(r: Any) -> dict[str, Any]:
-    return {
-        "node": r.node,
-        "order_channel": r.order_channel,
-        "txn_type": str(r.txn_type),
-        "period": str(r.period),
-        "raised": str(r.raised),
-        "closed": str(r.closed),
-        "broken": str(r.broken),
-        "open_orders": str(r.open_orders),
-    }
-
-
 def serialize_dataset(portfolio: SyntheticPortfolio) -> dict[str, Any]:
-    return {
-        "raw_order_event": [_serialize_order_event(e) for e in portfolio.raw_order_event],
-        "raw_subscription_event": [
-            _serialize_subscription_event(e) for e in portfolio.raw_subscription_event
-        ],
-        "raw_base_snapshot": [_serialize_base_snapshot(r) for r in portfolio.raw_base_snapshot],
-        "raw_order_book_snapshot": [
-            _serialize_order_book_snapshot(r) for r in portfolio.raw_order_book_snapshot
-        ],
-    }
+    """Thin alias kept for this module's own naming ("dataset") -- the
+    actual (de)serialization lives in engine.testing.serialize, shared
+    with the `python -m engine.testing.synthetic` CLI."""
+    return serialize_portfolio(portfolio)
