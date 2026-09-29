@@ -837,3 +837,14 @@ def generate_portfolio(params: SyntheticParams) -> SyntheticPortfolio:
         raw_base_snapshot=base_snapshots,
         raw_order_book_snapshot=order_book_snapshots,
     )
+
+
+if __name__ == "__main__":
+    # `python -m engine.testing.synthetic --base <config.yaml> --out <dir>`
+    # -- see engine/testing/cli.py. Imported lazily, here, rather than at
+    # module level: engine.testing.cli pulls in PyYAML, which nothing else
+    # in this module needs, so `import engine.testing.synthetic` alone
+    # (what every other caller in this package does) never requires it.
+    from engine.testing.cli import main
+
+    main()

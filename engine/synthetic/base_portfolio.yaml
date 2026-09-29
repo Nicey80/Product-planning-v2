@@ -1,0 +1,88 @@
+# Ground-truth config for `python -m engine.testing.synthetic`.
+#
+#   uv run python -m engine.testing.synthetic \
+#       --base synthetic/base_portfolio.yaml \
+#       --out fixtures/base_portfolio
+#
+# writes fixtures/base_portfolio/{raw_order_event,raw_subscription_event,
+# raw_base_snapshot,raw_order_book_snapshot}.json plus a copy of this file
+# for provenance.
+#
+# This mirrors engine/tests/golden_synthetic_scenario.py's PINNED_PARAMS,
+# so the two should produce identical data -- it exists as a runnable,
+# documented starting point, not a second independent scenario. See
+# engine/testing/config.py's docstrings for the full schema each section
+# accepts (constant vs. tenure-tabled hazards, "uniform" shorthands, etc).
+
+horizon: 24
+seed: 20260101
+
+# Leaf ids are generated deterministically as pg{g}-p{p}-v{v} / cg{g}-c{c}-s{s}.
+# With the shape below: nodes pg0-p0-v0, pg0-p0-v1; channels cg0-c0-s0, cg0-c0-s1.
+product_hierarchy:
+  groups: 1
+  products_per_group: 1
+  variants_per_product: 2
+
+channel_hierarchy:
+  groups: 1
+  channels_per_group: 1
+  sub_channels_per_channel: 2
+
+# Mean acquisition raises per period, per (node, channel) pair.
+acquisition_rate:
+  default: "6"
+  overrides: []
+
+contract_terms:
+  - term: monthly
+    weight: "0.7"
+  - term: annual
+    weight: "0.3"
+
+# P(destination | source, a regrade happens). "uniform" spreads a regrade
+# evenly across every node (including staying put, i.e. a contract
+# extension with no node change).
+regrade_transition: uniform
+
+regrade_hazard:
+  monthly: "0.02"
+  annual: "0.02"
+
+# Tenure-dependent example: no one churns in their acquisition period
+# (tenure 0 is structurally unobservable in this discrete model anyway --
+# see engine/estimate.py's estimate_churn_hazard docstring), monthly
+# subscribers settle at a 5%/period hazard from tenure 1 on, annual at 2%.
+churn_hazard:
+  monthly:
+    default: "0.05"
+    by_tenure:
+      0: "0.0"
+  annual:
+    default: "0.02"
+    by_tenure:
+      0: "0.0"
+
+# g(k): P(an order raised in period s closes in period s+k). breakage is
+# the residual probability it never closes. Must sum to exactly 1 per
+# txn_type; applied to every channel.
+closure:
+  acquisition:
+    g: ["0.5", "0.3", "0.1"]
+    breakage: "0.1"
+  regrade:
+    g: ["0.6", "0.2"]
+    breakage: "0.2"
+  churn:
+    g: ["0.8"]
+    breakage: "0.2"
+
+# Relative weight used when sampling which channel raises a regrade/churn
+# order (acquisitions use acquisition_rate's node x channel grain
+# directly). "uniform" gives every channel equal weight.
+order_channel_weight: uniform
+
+# Optional sections -- omit any of these entirely for "none".
+initial_base: {}
+channel_launch_period: {}
+structural_break: null
