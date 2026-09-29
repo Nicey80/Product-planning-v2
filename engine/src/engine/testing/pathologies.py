@@ -25,6 +25,7 @@ actually is:
 
 from __future__ import annotations
 
+import random
 from dataclasses import replace
 from decimal import Decimal
 
@@ -134,7 +135,7 @@ def pathology_bulk_closure_batch(
         ),
     )
 
-    term = portfolio.params.contract_terms[0]
+    term = str(portfolio.params.contract_terms[0])
     n = int(count)
     new_subscription_events = list(portfolio.raw_subscription_event)
     for i in range(n):
@@ -287,7 +288,7 @@ def pathology_orphaned_orders(
     real order/subscriber pipelines produce, not a broken identity within
     either table.
     """
-    term = portfolio.params.contract_terms[0]
+    term = str(portfolio.params.contract_terms[0])
     orphan_order = OrderEvent(
         node=node,
         order_channel=order_channel,
@@ -441,21 +442,23 @@ def pathology_churn_with_open_regrade() -> SyntheticPortfolio:
     )
 
     one_shot_profile = ClosureProfile(g=(_ONE,), breakage=_ZERO)
+    product = ph.product_of[node_a]
     params = SyntheticParams(
         product_hierarchy=ph,
         channel_hierarchy=ch,
         horizon=horizon,
         seed=0,
-        acquisition_rate={},
-        contract_terms=("monthly",),
-        contract_term_weights=(_ONE,),
+        acquisition={},
+        channel_mix={},
+        contract_terms=(1,),
+        contract_term_mix={channel: {1: _ONE}},
         regrade_transition={},
-        regrade_hazard=lambda _tenure, _term: _ZERO,
-        churn_hazard=lambda _tenure, _term: _ZERO,
+        regrade_hazard=lambda _ctx: _ZERO,
+        churn_hazard=lambda _ctx: _ZERO,
         closure={
-            (channel, TxnType.ACQUISITION): one_shot_profile,
-            (channel, TxnType.REGRADE): one_shot_profile,
-            (channel, TxnType.CHURN): one_shot_profile,
+            (channel, TxnType.ACQUISITION, product): one_shot_profile,
+            (channel, TxnType.REGRADE, product): one_shot_profile,
+            (channel, TxnType.CHURN, product): one_shot_profile,
         },
         order_channel_weight={channel: _ONE},
     )
@@ -481,16 +484,17 @@ def pathology_churn_with_open_regrade() -> SyntheticPortfolio:
 def pathology_thin_volume_node(
     params: SyntheticParams, *, node: NodeId, rate: Decimal = Decimal("0.05")
 ) -> SyntheticParams:
-    """Collapses `node`'s acquisition rate to a trickle across every
-    channel, leaving every other node at its original rate -- for testing
-    estimator behavior (near-zero risk sets at some kernel ages, wide
-    sampling noise) under sparse data.
+    """Collapses `node`'s acquisition process to a trickle (a constant
+    mean of `rate` at every period), leaving every other node at its
+    original process -- for testing estimator behavior (near-zero risk
+    sets at some kernel ages, wide sampling noise) under sparse data.
     """
-    new_rates = dict(params.acquisition_rate)
-    for key in list(new_rates):
-        if key[0] == node:
-            new_rates[key] = rate
-    return replace(params, acquisition_rate=new_rates)
+    process = params.acquisition.get(node)
+    if process is None:
+        return params
+    thin_process = replace(process, mean_by_period=dict.fromkeys(process.mean_by_period, rate))
+    new_acquisition = {**params.acquisition, node: thin_process}
+    return replace(params, acquisition=new_acquisition)
 
 
 # ---------------------------------------------------------------------------
@@ -509,3 +513,179 @@ def pathology_channel_launched_mid_history(
     launch = dict(params.channel_launch_period)
     launch[channel] = launch_period
     return replace(params, channel_launch_period=launch)
+
+
+# ---------------------------------------------------------------------------
+# Rate-driven pathology knobs -- called once by generate_portfolio at the
+# end of every run (see synthetic.py's _apply_pathology_rates), reading
+# params.pathology_rates. These are conceptually the same mutations as
+# this module's single-shot fixtures above (orphaned orders, backdated
+# events, a bulk closure batch), but implemented directly here as one
+# O(n) batch pass over the whole event log followed by exactly one
+# rebuild_snapshots call, rather than calling those fixtures once per
+# affected row -- at real-world portfolio scale (hundreds of thousands of
+# events), an O(rows) number of rebuilds would be O(n^2).
+# ---------------------------------------------------------------------------
+
+
+def _any_pathology_active(rates: object) -> bool:
+    from dataclasses import fields as _fields
+
+    for f in _fields(rates):  # type: ignore[arg-type]
+        value = getattr(rates, f.name)
+        if isinstance(value, bool):
+            if value:
+                return True
+        elif isinstance(value, Decimal) and value > _ZERO:
+            return True
+    return False
+
+
+def apply_pathology_rates(portfolio: SyntheticPortfolio, rng: random.Random) -> SyntheticPortfolio:
+    rates = portfolio.params.pathology_rates
+    if not _any_pathology_active(rates):
+        return portfolio
+
+    order_events = list(portfolio.raw_order_event)
+    subscription_events = list(portfolio.raw_subscription_event)
+    default_term = portfolio.params.contract_terms[0] if portfolio.params.contract_terms else 0
+    next_id = 0
+
+    def orphan_subscriber_id() -> str:
+        nonlocal next_id
+        next_id += 1
+        return f"sub-orphan-{next_id:08d}"
+
+    # -- orphan_orders: closed with no matching base movement --
+    if rates.orphan_closed_with_no_base_movement_rate > _ZERO:
+        closed_acquisitions = [
+            order_e
+            for order_e in list(order_events)
+            if order_e.event_type == "closed" and order_e.txn_type == TxnType.ACQUISITION
+        ]
+        for order_e in closed_acquisitions:
+            if rng.random() < float(rates.orphan_closed_with_no_base_movement_rate):
+                order_events.append(replace(order_e, count=_ONE))
+
+    # -- orphan_orders: base movement with no matching order --
+    if rates.orphan_base_movement_with_no_order_rate > _ZERO:
+        acquired = [sub_e for sub_e in list(subscription_events) if sub_e.event_type == "acquired"]
+        for sub_e in acquired:
+            if rng.random() < float(rates.orphan_base_movement_with_no_order_rate):
+                subscription_events.append(
+                    SubscriptionEvent(
+                        subscriber_id=orphan_subscriber_id(),
+                        event_type="churned",
+                        period=sub_e.period,
+                        node=sub_e.node,
+                        from_node=None,
+                        acquisition_channel=sub_e.acquisition_channel,
+                        contract_term=sub_e.contract_term,
+                        tenure=0,
+                    )
+                )
+
+    # -- backdated_events: a closed order re-recorded at an earlier period,
+    # as if discovered/corrected after the fact --
+    if rates.backdated_rate > _ZERO and rates.backdated_max_periods_back > 0:
+        closed = [order_e for order_e in list(order_events) if order_e.event_type == "closed"]
+        for order_e in closed:
+            if rng.random() < float(rates.backdated_rate):
+                back = rng.randint(1, rates.backdated_max_periods_back)
+                backdated_period = Period(max(int(order_e.event_period) - back, 0))
+                order_events.append(replace(order_e, event_period=backdated_period, count=_ONE))
+
+    # -- zombie_orders: force some closed orders to instead have never
+    # resolved at all -- drop the "closed" row, leaving the "raised" row
+    # (still present) as permanently, unrealistically open --
+    if rates.zombie_orders_rate > _ZERO:
+        kept: list[OrderEvent] = []
+        for order_e in order_events:
+            if order_e.event_type == "closed" and rng.random() < float(rates.zombie_orders_rate):
+                continue
+            kept.append(order_e)
+        order_events = kept
+
+    # -- duplicate_orders: an exact duplicate raise+resolution pair for
+    # the same cohort, as if the same order was recorded twice --
+    if rates.duplicate_orders_rate > _ZERO:
+        raised = [order_e for order_e in list(order_events) if order_e.event_type == "raised"]
+        for order_e in raised:
+            if rng.random() < float(rates.duplicate_orders_rate):
+                order_events.append(replace(order_e, count=_ONE))
+                matching_resolution = next(
+                    (
+                        r
+                        for r in order_events
+                        if r.event_type != "raised"
+                        and r.node == order_e.node
+                        and r.order_channel == order_e.order_channel
+                        and r.txn_type == order_e.txn_type
+                        and r.raise_period == order_e.raise_period
+                    ),
+                    None,
+                )
+                if matching_resolution is not None:
+                    order_events.append(replace(matching_resolution, count=_ONE))
+
+    # -- status_flapping: an order recorded closed, apparently reopened,
+    # then closed again -- approximated at this aggregate (cohort-count)
+    # grain as an extra "closed" row for the same cohort landing at a
+    # later period than its true close, since there's no per-order
+    # "reopened" event in this event vocabulary to model the transition
+    # literally --
+    if rates.status_flapping_rate > _ZERO:
+        closed = [order_e for order_e in list(order_events) if order_e.event_type == "closed"]
+        for order_e in closed:
+            if rng.random() < float(rates.status_flapping_rate):
+                flap_period = Period(int(order_e.event_period) + 1)
+                order_events.append(replace(order_e, event_period=flap_period, count=_ONE))
+
+    # -- bulk_closure_batch: a single large batch close of the oldest
+    # still-open acquisition cohort in the portfolio, landing on the last
+    # observed period, independent of the kernel's normal pacing --
+    if rates.bulk_closure_batch_enabled:
+        open_by_cohort: dict[tuple[NodeId, ChannelId, Period], Decimal] = {}
+        for order_e in order_events:
+            key = (order_e.node, order_e.order_channel, order_e.raise_period)
+            if order_e.txn_type != TxnType.ACQUISITION:
+                continue
+            if order_e.event_type == "raised":
+                open_by_cohort[key] = open_by_cohort.get(key, _ZERO) + order_e.count
+            elif order_e.event_type in ("closed", "broken"):
+                open_by_cohort[key] = open_by_cohort.get(key, _ZERO) - order_e.count
+        oldest_open = [(k, v) for k, v in open_by_cohort.items() if v > _ZERO]
+        if oldest_open:
+            (node, channel, raise_period), count = min(oldest_open, key=lambda kv: int(kv[0][2]))
+            last_period = Period(portfolio.params.horizon - 1)
+            order_events.append(
+                OrderEvent(
+                    node=node,
+                    order_channel=channel,
+                    txn_type=TxnType.ACQUISITION,
+                    raise_period=raise_period,
+                    event_type="closed",
+                    event_period=last_period,
+                    count=count,
+                )
+            )
+            for _ in range(int(count)):
+                subscription_events.append(
+                    SubscriptionEvent(
+                        subscriber_id=orphan_subscriber_id(),
+                        event_type="acquired",
+                        period=last_period,
+                        node=node,
+                        from_node=None,
+                        acquisition_channel=channel,
+                        contract_term=str(default_term),
+                        tenure=0,
+                    )
+                )
+
+    mutated = replace(
+        portfolio,
+        raw_order_event=tuple(order_events),
+        raw_subscription_event=tuple(subscription_events),
+    )
+    return rebuild_snapshots(mutated)

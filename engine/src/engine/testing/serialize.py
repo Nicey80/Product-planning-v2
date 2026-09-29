@@ -180,3 +180,85 @@ def _deserialize_order_book_snapshot(row: dict[str, Any]) -> OrderBookSnapshot:
         broken=Decimal(row["broken"]),
         open_orders=Decimal(row["open_orders"]),
     )
+
+
+# ---------------------------------------------------------------------------
+# Dimension / ground-truth reporting tables -- the CLI's dim_product.json,
+# dim_channel.json, and truth.json outputs.
+# ---------------------------------------------------------------------------
+
+
+def dim_product_rows(params: SyntheticParams) -> list[dict[str, Any]]:
+    """One row per node: its product, product_group, and launch/retire
+    period (None if it never launches late / never retires)."""
+    ph = params.product_hierarchy
+    return [
+        {
+            "node": node,
+            "product": ph.product_of[node],
+            "product_group": ph.group_of_product[ph.product_of[node]],
+            "launch_period": params.node_launch_period.get(node),
+            "retire_period": params.node_retire_period.get(node),
+        }
+        for node in ph.nodes
+    ]
+
+
+def dim_channel_rows(params: SyntheticParams) -> list[dict[str, Any]]:
+    """One row per leaf channel: its channel_group and launch period."""
+    ch = params.channel_hierarchy
+    return [
+        {
+            "channel": channel,
+            "channel_group": ch.group_of_channel[ch.channel_of[channel]],
+            "launch_period": params.channel_launch_period.get(channel),
+        }
+        for channel in ch.sub_channels
+    ]
+
+
+def truth_summary(params: SyntheticParams) -> dict[str, Any]:
+    """The subset of the spec's `output.truth` ground-truth artifacts that
+    reduce cleanly to a static table: the closure kernel (g/breakage per
+    channel x txn_type x product), the regrade transition matrix (including
+    the EXTEND_SAME sentinel, written back out as the literal string
+    "_extend_same"), regrade_extension_with_move_rate, and the migration
+    schedule.
+
+    Deliberately NOT included: channel_mix_by_node_period and
+    acquisition_level_by_node_channel_period are period-varying series,
+    already fully present (and more directly usable for parameter
+    recovery) in raw_order_event/raw_subscription_event -- restating them
+    here would just be a second, redundant copy. churn_hazard_by_tenure_
+    term_channel / regrade_hazard_by_tenure_term aren't reducible to a
+    static table under this module's contract-expiry-window hazard model
+    (HazardFn is a function of period, tenure, months-since-contract-start,
+    contract_term, acquisition_channel, and node -- not just tenure and
+    term). amendment_matrix is Stage 2 (not implemented).
+    """
+    closure = {
+        f"{channel}|{txn_type}|{product}": {
+            "g": [str(v) for v in profile.g],
+            "breakage": str(profile.breakage),
+        }
+        for (channel, txn_type, product), profile in params.closure.items()
+    }
+    regrade_transition = {
+        str(source): {str(dest): str(p) for dest, p in dist.items()}
+        for source, dist in params.regrade_transition.items()
+    }
+    migrations = [
+        {
+            "name": m.name,
+            "from_node": m.from_node,
+            "to_node": m.to_node,
+            "schedule": {str(period): str(count) for period, count in m.schedule.items()},
+        }
+        for m in params.migrations
+    ]
+    return {
+        "closure_kernel_g_k": closure,
+        "regrade_transition_matrix": regrade_transition,
+        "regrade_extension_with_move_rate": str(params.regrade_extension_with_move_rate),
+        "migration_schedule": migrations,
+    }

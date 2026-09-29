@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from engine.domain import NodeId, TxnType
+from engine.domain import NodeId, Period, TxnType
 from engine.estimate import (
     estimate_churn_hazard,
     estimate_closure_kernel,
@@ -24,7 +24,9 @@ from engine.estimate import (
     raised_by_cohort_from_events,
 )
 from engine.testing.synthetic import (
+    AcquisitionProcess,
     ClosureProfile,
+    HazardContext,
     SyntheticParams,
     generate_portfolio,
     make_channel_hierarchy,
@@ -33,6 +35,10 @@ from engine.testing.synthetic import (
 )
 
 _ZERO = Decimal(0)
+
+
+def _zero_hazard(_ctx: HazardContext) -> Decimal:
+    return _ZERO
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +51,9 @@ def test_recovers_closure_kernel_and_breakage() -> None:
     ch = make_channel_hierarchy(groups=1, channels_per_group=1, sub_channels_per_channel=1)
     node = ph.nodes[0]
     channel = ch.sub_channels[0]
+    product = ph.product_of[node]
+    horizon = 120
+    periods = tuple(Period(t) for t in range(horizon))
 
     true_g = (Decimal("0.45"), Decimal("0.25"), Decimal("0.15"))
     true_breakage = Decimal("0.15")
@@ -53,15 +62,20 @@ def test_recovers_closure_kernel_and_breakage() -> None:
     params = SyntheticParams(
         product_hierarchy=ph,
         channel_hierarchy=ch,
-        horizon=120,
+        horizon=horizon,
         seed=1,
-        acquisition_rate={(node, channel): Decimal("60")},
-        contract_terms=("monthly",),
-        contract_term_weights=(Decimal(1),),
+        acquisition={
+            node: AcquisitionProcess(
+                mean_by_period=dict.fromkeys(periods, Decimal("60")), dispersion=_ZERO
+            )
+        },
+        channel_mix={node: {t: {channel: Decimal(1)} for t in periods}},
+        contract_terms=(1,),
+        contract_term_mix={channel: {1: Decimal(1)}},
         regrade_transition={},
-        regrade_hazard=lambda _t, _c: _ZERO,
-        churn_hazard=lambda _t, _c: _ZERO,
-        closure={(channel, TxnType.ACQUISITION): profile},
+        regrade_hazard=_zero_hazard,
+        churn_hazard=_zero_hazard,
+        closure={(channel, TxnType.ACQUISITION, product): profile},
         order_channel_weight={channel: Decimal(1)},
     )
     portfolio = generate_portfolio(params)
@@ -102,6 +116,9 @@ def test_recovers_regrade_transition_matrix() -> None:
     ch = make_channel_hierarchy(groups=1, channels_per_group=1, sub_channels_per_channel=1)
     nodes = ph.nodes
     channel = ch.sub_channels[0]
+    product = ph.product_of[nodes[0]]
+    horizon = 100
+    periods = tuple(Period(t) for t in range(horizon))
 
     # a deliberately non-uniform transition matrix
     true_transition: dict[NodeId, dict[NodeId, Decimal]] = {
@@ -111,23 +128,36 @@ def test_recovers_regrade_transition_matrix() -> None:
     }
     one_shot = ClosureProfile(g=(Decimal(1),), breakage=_ZERO)
 
+    def _regrade_hazard(_ctx: HazardContext) -> Decimal:
+        return Decimal("0.08")
+
+    def _churn_hazard(_ctx: HazardContext) -> Decimal:
+        return Decimal("0.01")
+
     params = SyntheticParams(
         product_hierarchy=ph,
         channel_hierarchy=ch,
-        horizon=100,
+        horizon=horizon,
         seed=11,
-        acquisition_rate={(n, channel): Decimal("15") for n in nodes},
-        contract_terms=("monthly",),
-        contract_term_weights=(Decimal(1),),
+        acquisition={
+            n: AcquisitionProcess(
+                mean_by_period=dict.fromkeys(periods, Decimal("15")), dispersion=_ZERO
+            )
+            for n in nodes
+        },
+        channel_mix={n: {t: {channel: Decimal(1)} for t in periods} for n in nodes},
+        contract_terms=(1,),
+        contract_term_mix={channel: {1: Decimal(1)}},
         regrade_transition=true_transition,
-        regrade_hazard=lambda _t, _c: Decimal("0.08"),
-        churn_hazard=lambda _t, _c: Decimal("0.01"),
+        regrade_hazard=_regrade_hazard,
+        churn_hazard=_churn_hazard,
         closure={
-            (channel, TxnType.ACQUISITION): one_shot,
-            (channel, TxnType.REGRADE): one_shot,
-            (channel, TxnType.CHURN): one_shot,
+            (channel, TxnType.ACQUISITION, product): one_shot,
+            (channel, TxnType.REGRADE, product): one_shot,
+            (channel, TxnType.CHURN, product): one_shot,
         },
         order_channel_weight={channel: Decimal(1)},
+        regrade_order_channel_mix={t: {channel: Decimal(1)} for t in periods},
     )
     portfolio = generate_portfolio(params)
 
@@ -150,29 +180,50 @@ def test_recovers_regrade_transition_matrix() -> None:
 
 
 def test_recovers_churn_hazard_by_tenure_and_contract_term() -> None:
+    """estimate_churn_hazard is only matched here for a hazard that's
+    constant per contract term (window-independent) -- identical to what
+    the old tenure+term-only model could express. Recovering the richer
+    contract-expiry-window hazard shape (a function of
+    months_since_contract_start, not just tenure/term) needs a matching
+    estimator that doesn't exist yet in engine/estimate.py; that's future
+    work, not something this generator change should shim around.
+    """
     ph = make_product_hierarchy(groups=1, products_per_group=1, variants_per_product=1)
     ch = make_channel_hierarchy(groups=1, channels_per_group=1, sub_channels_per_channel=1)
     node = ph.nodes[0]
     channel = ch.sub_channels[0]
+    product = ph.product_of[node]
+    horizon = 80
+    periods = tuple(Period(t) for t in range(horizon))
     one_shot = ClosureProfile(g=(Decimal(1),), breakage=_ZERO)
 
-    true_hazard = {"monthly": Decimal("0.05"), "annual": Decimal("0.015")}
+    # contract terms are lengths in periods: 1 stands in for "monthly", 12
+    # for "annual".
+    true_hazard = {1: Decimal("0.05"), 12: Decimal("0.015")}
 
-    def churn_hazard(_tenure: int, term: str) -> Decimal:
-        return true_hazard[term]
+    def churn_hazard(ctx: HazardContext) -> Decimal:
+        return true_hazard[ctx.contract_term]
 
     params = SyntheticParams(
         product_hierarchy=ph,
         channel_hierarchy=ch,
-        horizon=80,
+        horizon=horizon,
         seed=5,
-        acquisition_rate={(node, channel): Decimal("50")},
-        contract_terms=("monthly", "annual"),
-        contract_term_weights=(Decimal("0.5"), Decimal("0.5")),
+        acquisition={
+            node: AcquisitionProcess(
+                mean_by_period=dict.fromkeys(periods, Decimal("50")), dispersion=_ZERO
+            )
+        },
+        channel_mix={node: {t: {channel: Decimal(1)} for t in periods}},
+        contract_terms=(1, 12),
+        contract_term_mix={channel: {1: Decimal("0.5"), 12: Decimal("0.5")}},
         regrade_transition={},
-        regrade_hazard=lambda _t, _c: _ZERO,
+        regrade_hazard=_zero_hazard,
         churn_hazard=churn_hazard,
-        closure={(channel, TxnType.ACQUISITION): one_shot, (channel, TxnType.CHURN): one_shot},
+        closure={
+            (channel, TxnType.ACQUISITION, product): one_shot,
+            (channel, TxnType.CHURN, product): one_shot,
+        },
         order_channel_weight={channel: Decimal(1)},
     )
     portfolio = generate_portfolio(params)
@@ -187,9 +238,10 @@ def test_recovers_churn_hazard_by_tenure_and_contract_term() -> None:
     # they can be selected as a churn candidate, which can only happen in a
     # later period -- so hazard(0, *) is always estimated as 0 regardless
     # of the true input. Recovery is checked from tenure 1 onward, where
-    # there's a real at-risk population.
+    # there's a real at-risk population. raw_subscription_event's
+    # contract_term is str(term) at generation time.
     for term, true_p in true_hazard.items():
-        errors = [abs(estimated[(k, term)] - true_p) for k in range(1, 12)]
+        errors = [abs(estimated[(k, str(term))] - true_p) for k in range(1, 12)]
         assert max(errors) < Decimal("0.02"), (term, errors)
 
 
@@ -217,6 +269,9 @@ def test_censored_cohort_estimator_is_unbiased_naive_is_not() -> None:
     ch = make_channel_hierarchy(groups=1, channels_per_group=1, sub_channels_per_channel=1)
     node = ph.nodes[0]
     channel = ch.sub_channels[0]
+    product = ph.product_of[node]
+    horizon = 12  # << kernel max_lag=8: most cohorts are censored at high k
+    periods = tuple(Period(t) for t in range(horizon))
 
     true_g = tuple(Decimal("0.1") for _ in range(8))  # ages 0..7
     true_breakage = Decimal(1) - sum(true_g, start=_ZERO)  # 0.2
@@ -225,15 +280,20 @@ def test_censored_cohort_estimator_is_unbiased_naive_is_not() -> None:
     params = SyntheticParams(
         product_hierarchy=ph,
         channel_hierarchy=ch,
-        horizon=12,  # << kernel max_lag=8: most cohorts are censored at high k
+        horizon=horizon,
         seed=21,
-        acquisition_rate={(node, channel): Decimal("80")},
-        contract_terms=("monthly",),
-        contract_term_weights=(Decimal(1),),
+        acquisition={
+            node: AcquisitionProcess(
+                mean_by_period=dict.fromkeys(periods, Decimal("80")), dispersion=_ZERO
+            )
+        },
+        channel_mix={node: {t: {channel: Decimal(1)} for t in periods}},
+        contract_terms=(1,),
+        contract_term_mix={channel: {1: Decimal(1)}},
         regrade_transition={},
-        regrade_hazard=lambda _t, _c: _ZERO,
-        churn_hazard=lambda _t, _c: _ZERO,
-        closure={(channel, TxnType.ACQUISITION): profile},
+        regrade_hazard=_zero_hazard,
+        churn_hazard=_zero_hazard,
+        closure={(channel, TxnType.ACQUISITION, product): profile},
         order_channel_weight={channel: Decimal(1)},
     )
     portfolio = generate_portfolio(params)

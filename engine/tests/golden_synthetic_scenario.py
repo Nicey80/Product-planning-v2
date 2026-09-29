@@ -70,7 +70,9 @@ from engine.hierarchy import roll_up
 from engine.kernel import apply_closure_kernel
 from engine.testing.serialize import serialize_portfolio
 from engine.testing.synthetic import (
+    AcquisitionProcess,
     ClosureProfile,
+    HazardContext,
     SyntheticParams,
     SyntheticPortfolio,
     generate_portfolio,
@@ -87,12 +89,15 @@ _ZERO = Decimal(0)
 # procedure above, same as any other intentional golden update.
 # ---------------------------------------------------------------------------
 
+_HORIZON = 24
 _PRODUCT_HIERARCHY = make_product_hierarchy(groups=1, products_per_group=1, variants_per_product=2)
 _CHANNEL_HIERARCHY = make_channel_hierarchy(
     groups=1, channels_per_group=1, sub_channels_per_channel=2
 )
 _NODES = _PRODUCT_HIERARCHY.nodes
 _CHANNELS = _CHANNEL_HIERARCHY.sub_channels
+_PRODUCT = _PRODUCT_HIERARCHY.product_of[_NODES[0]]
+_PERIODS = tuple(Period(t) for t in range(_HORIZON))
 
 _ACQUISITION_PROFILE = ClosureProfile(
     g=(Decimal("0.5"), Decimal("0.3"), Decimal("0.1")), breakage=Decimal("0.1")
@@ -100,30 +105,48 @@ _ACQUISITION_PROFILE = ClosureProfile(
 _REGRADE_PROFILE = ClosureProfile(g=(Decimal("0.6"), Decimal("0.2")), breakage=Decimal("0.2"))
 _CHURN_PROFILE = ClosureProfile(g=(Decimal("0.8"),), breakage=Decimal("0.2"))
 
-_TRUE_CHURN_HAZARD = {"monthly": Decimal("0.05"), "annual": Decimal("0.02")}
+# contract terms are lengths in periods (e.g. months): 1 stands in for
+# "monthly", 12 for "annual".
+_TRUE_CHURN_HAZARD = {1: Decimal("0.05"), 12: Decimal("0.02")}
 
 
-def _churn_hazard(_tenure: int, term: str) -> Decimal:
-    return _TRUE_CHURN_HAZARD[term]
+def _churn_hazard(ctx: HazardContext) -> Decimal:
+    return _TRUE_CHURN_HAZARD[ctx.contract_term]
+
+
+def _regrade_hazard(_ctx: HazardContext) -> Decimal:
+    return Decimal("0.02")
 
 
 PINNED_PARAMS = SyntheticParams(
     product_hierarchy=_PRODUCT_HIERARCHY,
     channel_hierarchy=_CHANNEL_HIERARCHY,
-    horizon=24,
+    horizon=_HORIZON,
     seed=20260101,
-    acquisition_rate={(n, c): Decimal("6") for n in _NODES for c in _CHANNELS},
-    contract_terms=("monthly", "annual"),
-    contract_term_weights=(Decimal("0.7"), Decimal("0.3")),
+    acquisition={
+        n: AcquisitionProcess(
+            mean_by_period=dict.fromkeys(_PERIODS, Decimal("6")), dispersion=_ZERO
+        )
+        for n in _NODES
+    },
+    channel_mix={
+        n: {t: {c: Decimal(1) / len(_CHANNELS) for c in _CHANNELS} for t in _PERIODS}
+        for n in _NODES
+    },
+    contract_terms=(1, 12),
+    contract_term_mix={c: {1: Decimal("0.7"), 12: Decimal("0.3")} for c in _CHANNELS},
     regrade_transition={n: {m: Decimal(1) / len(_NODES) for m in _NODES} for n in _NODES},
-    regrade_hazard=lambda _t, _c: Decimal("0.02"),
+    regrade_hazard=_regrade_hazard,
     churn_hazard=_churn_hazard,
     closure={
-        **{(c, TxnType.ACQUISITION): _ACQUISITION_PROFILE for c in _CHANNELS},
-        **{(c, TxnType.REGRADE): _REGRADE_PROFILE for c in _CHANNELS},
-        **{(c, TxnType.CHURN): _CHURN_PROFILE for c in _CHANNELS},
+        **{(c, TxnType.ACQUISITION, _PRODUCT): _ACQUISITION_PROFILE for c in _CHANNELS},
+        **{(c, TxnType.REGRADE, _PRODUCT): _REGRADE_PROFILE for c in _CHANNELS},
+        **{(c, TxnType.CHURN, _PRODUCT): _CHURN_PROFILE for c in _CHANNELS},
     },
     order_channel_weight={c: Decimal(1) for c in _CHANNELS},
+    regrade_order_channel_mix={
+        t: {c: Decimal(1) / len(_CHANNELS) for c in _CHANNELS} for t in _PERIODS
+    },
 )
 
 _FORECAST_HORIZON = 6  # periods projected forward beyond the dataset
@@ -195,17 +218,18 @@ def run_forecast(portfolio: SyntheticPortfolio) -> dict[str, Any]:
     estimated_churn_hazard = estimate_churn_hazard(
         portfolio.raw_subscription_event, observation_cutoff=cutoff, max_tenure=_CHURN_MAX_TENURE
     )
+    # raw_subscription_event's contract_term is a string (str(term) at
+    # generation time); PINNED_PARAMS.contract_terms/contract_term_mix are
+    # ints -- bridge the two here. Every channel shares the same
+    # contract_term_mix in this pinned scenario, so any one is
+    # representative for a portfolio-wide blend.
+    representative_mix = PINNED_PARAMS.contract_term_mix[_CHANNELS[0]]
     blended_churn_rate: dict[str, Decimal] = {
-        term: estimated_churn_hazard.get((_REPRESENTATIVE_TENURE, term), _ZERO)
+        str(term): estimated_churn_hazard.get((_REPRESENTATIVE_TENURE, str(term)), _ZERO)
         for term in PINNED_PARAMS.contract_terms
     }
     projected_churn_rate = sum(
-        (
-            blended_churn_rate[t] * w
-            for t, w in zip(
-                PINNED_PARAMS.contract_terms, PINNED_PARAMS.contract_term_weights, strict=True
-            )
-        ),
+        (blended_churn_rate[str(term)] * weight for term, weight in representative_mix.items()),
         start=_ZERO,
     )
 

@@ -1,0 +1,76 @@
+# Small, fast config for test_cli.py -- exercises every required section of
+# engine.testing.config's schema at a scale that runs in well under a
+# second (2 nodes, 2 channels, an 8-period horizon), unlike the real-scale
+# synthetic/base_portfolio.yaml (~2 minutes, not part of the automated
+# suite). Keep this file minimal: it exists to prove the loader wires a
+# config to generate_portfolio end to end, not to be a realistic scenario.
+
+meta:
+  name: small_test_fixture
+  seed: 42
+  period_grain: month
+  history_start: 2024-01
+  book_snapshot_date: 2024-06
+  forecast_horizon_months: 2
+
+product_hierarchy:
+  - group: g0
+    products:
+      - product: p0
+        variants:
+          - { node: n0 }
+          - { node: n1 }
+
+channel_hierarchy:
+  - group: cg0
+    channels:
+      - { channel: c0 }
+      - { channel: c1 }
+
+contract_terms: [1, 12]
+
+acquisition:
+  defaults:
+    process: negative_binomial
+    dispersion: 0.0
+    trend_pct_per_month: 0.0
+  nodes:
+    n0: { level: 20 }
+    n1: { level: 15 }
+  channel_mix:
+    defaults:
+      c0: { share: 0.6 }
+      c1: { share: 0.4 }
+  contract_term_mix:
+    defaults: { 1: 0.7, 12: 0.3 }
+
+regrade:
+  hazard:
+    base_monthly_rate: 0.03
+    out_of_contract_rate: 0.03
+  order_channel_mix:
+    c0: { share: 0.5 }
+    c1: { share: 0.5 }
+  transitions:
+    n0: { n1: 1.0 }
+    n1: { n0: 1.0 }
+
+churn:
+  hazard:
+    in_contract_monthly: 0.02
+    out_of_contract_monthly: 0.05
+
+pipeline:
+  max_order_age_periods: 4
+  defaults:
+    cycle_time: { distribution: lognormal, median_days: 10, p90_days: 30 }
+    breakage_rate: 0.1
+
+output:
+  self_check:
+    assert_order_book_identity: true
+    assert_base_identity: true
+    assert_resign_conservation: true
+    assert_kernel_sums_to_one: true
+    assert_non_negative_base: true
+    assert_migrations_net_zero_when_paired: true
