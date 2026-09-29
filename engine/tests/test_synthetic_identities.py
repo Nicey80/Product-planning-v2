@@ -16,7 +16,9 @@ import pytest
 
 from engine.domain import ChannelId, NodeId, Period, TxnType
 from engine.testing.synthetic import (
+    AcquisitionProcess,
     ClosureProfile,
+    HazardContext,
     SubscriptionEvent,
     SyntheticParams,
     generate_portfolio,
@@ -27,9 +29,19 @@ from engine.testing.synthetic import (
 _ZERO = Decimal(0)
 
 
+def _regrade_hazard(_ctx: HazardContext) -> Decimal:
+    return Decimal("0.03")
+
+
+def _churn_hazard(_ctx: HazardContext) -> Decimal:
+    return Decimal("0.04")
+
+
 def _params(*, nodes: int, channels: int, horizon: int, seed: int, rate: str) -> SyntheticParams:
     ph = make_product_hierarchy(groups=1, products_per_group=1, variants_per_product=nodes)
     ch = make_channel_hierarchy(groups=1, channels_per_group=1, sub_channels_per_channel=channels)
+    product = ph.product_of[ph.nodes[0]]
+    periods = tuple(Period(t) for t in range(horizon))
     profile_acq = ClosureProfile(
         g=(Decimal("0.4"), Decimal("0.3"), Decimal("0.1")), breakage=Decimal("0.2")
     )
@@ -37,22 +49,34 @@ def _params(*, nodes: int, channels: int, horizon: int, seed: int, rate: str) ->
     profile_churn = ClosureProfile(g=(Decimal("0.7"),), breakage=Decimal("0.3"))
     closure = {}
     for c in ch.sub_channels:
-        closure[(c, TxnType.ACQUISITION)] = profile_acq
-        closure[(c, TxnType.REGRADE)] = profile_regrade
-        closure[(c, TxnType.CHURN)] = profile_churn
+        closure[(c, TxnType.ACQUISITION, product)] = profile_acq
+        closure[(c, TxnType.REGRADE, product)] = profile_regrade
+        closure[(c, TxnType.CHURN, product)] = profile_churn
     return SyntheticParams(
         product_hierarchy=ph,
         channel_hierarchy=ch,
         horizon=horizon,
         seed=seed,
-        acquisition_rate={(n, c): Decimal(rate) for n in ph.nodes for c in ch.sub_channels},
-        contract_terms=("monthly", "annual"),
-        contract_term_weights=(Decimal("0.6"), Decimal("0.4")),
+        acquisition={
+            n: AcquisitionProcess(
+                mean_by_period=dict.fromkeys(periods, Decimal(rate)), dispersion=_ZERO
+            )
+            for n in ph.nodes
+        },
+        channel_mix={
+            n: {t: {c: Decimal(1) / len(ch.sub_channels) for c in ch.sub_channels} for t in periods}
+            for n in ph.nodes
+        },
+        contract_terms=(1, 12),
+        contract_term_mix={c: {1: Decimal("0.6"), 12: Decimal("0.4")} for c in ch.sub_channels},
         regrade_transition={n: {m: Decimal(1) / len(ph.nodes) for m in ph.nodes} for n in ph.nodes},
-        regrade_hazard=lambda t, c: Decimal("0.03"),
-        churn_hazard=lambda t, c: Decimal("0.04"),
+        regrade_hazard=_regrade_hazard,
+        churn_hazard=_churn_hazard,
         closure=closure,
         order_channel_weight={c: Decimal(1) for c in ch.sub_channels},
+        regrade_order_channel_mix={
+            t: {c: Decimal(1) / len(ch.sub_channels) for c in ch.sub_channels} for t in periods
+        },
     )
 
 

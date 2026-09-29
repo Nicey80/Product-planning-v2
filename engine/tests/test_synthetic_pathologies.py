@@ -28,7 +28,9 @@ from engine.testing.pathologies import (
     pathology_thin_volume_node,
 )
 from engine.testing.synthetic import (
+    AcquisitionProcess,
     ClosureProfile,
+    HazardContext,
     SyntheticParams,
     generate_portfolio,
     make_channel_hierarchy,
@@ -39,31 +41,50 @@ from engine.testing.synthetic import (
 _ZERO = Decimal(0)
 
 
+def _regrade_hazard(_ctx: HazardContext) -> Decimal:
+    return Decimal("0.02")
+
+
+def _churn_hazard(_ctx: HazardContext) -> Decimal:
+    return Decimal("0.05")
+
+
 def _base_params(*, horizon: int = 20, seed: int = 100) -> SyntheticParams:
     ph = make_product_hierarchy(groups=1, products_per_group=1, variants_per_product=2)
     ch = make_channel_hierarchy(groups=1, channels_per_group=1, sub_channels_per_channel=1)
     nodes = ph.nodes
     channel = ch.sub_channels[0]
+    product = ph.product_of[nodes[0]]
+    periods = tuple(Period(t) for t in range(horizon))
     profile = ClosureProfile(g=(Decimal("0.5"), Decimal("0.3")), breakage=Decimal("0.2"))
     return SyntheticParams(
         product_hierarchy=ph,
         channel_hierarchy=ch,
         horizon=horizon,
         seed=seed,
-        acquisition_rate={(n, channel): Decimal("8") for n in nodes},
-        contract_terms=("monthly",),
-        contract_term_weights=(Decimal(1),),
+        acquisition={
+            n: AcquisitionProcess(
+                mean_by_period=dict.fromkeys(periods, Decimal("8")), dispersion=_ZERO
+            )
+            for n in nodes
+        },
+        channel_mix={n: {t: {channel: Decimal(1)} for t in periods} for n in nodes},
+        contract_terms=(1,),
+        contract_term_mix={channel: {1: Decimal(1)}},
         regrade_transition={n: {m: Decimal(1) / len(nodes) for m in nodes} for n in nodes},
-        regrade_hazard=lambda _t, _c: Decimal("0.02"),
-        churn_hazard=lambda _t, _c: Decimal("0.05"),
+        regrade_hazard=_regrade_hazard,
+        churn_hazard=_churn_hazard,
         closure={
-            (channel, TxnType.ACQUISITION): profile,
-            (channel, TxnType.REGRADE): ClosureProfile(
+            (channel, TxnType.ACQUISITION, product): profile,
+            (channel, TxnType.REGRADE, product): ClosureProfile(
                 g=(Decimal("0.6"),), breakage=Decimal("0.4")
             ),
-            (channel, TxnType.CHURN): ClosureProfile(g=(Decimal("0.8"),), breakage=Decimal("0.2")),
+            (channel, TxnType.CHURN, product): ClosureProfile(
+                g=(Decimal("0.8"),), breakage=Decimal("0.2")
+            ),
         },
         order_channel_weight={channel: Decimal(1)},
+        regrade_order_channel_mix={t: {channel: Decimal(1)} for t in periods},
     )
 
 
@@ -400,6 +421,8 @@ def test_right_censored_fixture_feeds_naive_estimator_a_visible_bias() -> None:
     ch = make_channel_hierarchy(groups=1, channels_per_group=1, sub_channels_per_channel=1)
     node = ph.nodes[0]
     channel = ch.sub_channels[0]
+    product = ph.product_of[node]
+    periods = tuple(Period(t) for t in range(9))
     true_g = tuple(Decimal("0.1") for _ in range(6))
     profile = ClosureProfile(g=true_g, breakage=Decimal(1) - sum(true_g, start=_ZERO))
 
@@ -408,13 +431,18 @@ def test_right_censored_fixture_feeds_naive_estimator_a_visible_bias() -> None:
         channel_hierarchy=ch,
         horizon=9,
         seed=42,
-        acquisition_rate={(node, channel): Decimal("60")},
-        contract_terms=("monthly",),
-        contract_term_weights=(Decimal(1),),
+        acquisition={
+            node: AcquisitionProcess(
+                mean_by_period=dict.fromkeys(periods, Decimal("60")), dispersion=_ZERO
+            )
+        },
+        channel_mix={node: {t: {channel: Decimal(1)} for t in periods}},
+        contract_terms=(1,),
+        contract_term_mix={channel: {1: Decimal(1)}},
         regrade_transition={},
-        regrade_hazard=lambda _t, _c: _ZERO,
-        churn_hazard=lambda _t, _c: _ZERO,
-        closure={(channel, TxnType.ACQUISITION): profile},
+        regrade_hazard=lambda _ctx: _ZERO,
+        churn_hazard=lambda _ctx: _ZERO,
+        closure={(channel, TxnType.ACQUISITION, product): profile},
         order_channel_weight={channel: Decimal(1)},
     )
     portfolio = pathology_right_censored_recent_cohorts(params)
