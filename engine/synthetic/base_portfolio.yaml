@@ -1,88 +1,476 @@
-# Ground-truth config for `python -m engine.testing.synthetic`.
+# =============================================================================
+# base_portfolio.yaml
+# Ground-truth parameters for engine/testing/synthetic.py
+#
+# Everything here is TRUTH. The simulator emits event logs from these numbers;
+# the estimators must recover them. Nothing in this file is estimated — if a
+# value is uncertain, that uncertainty belongs in a `noise` block, not in a
+# vaguer point estimate.
+#
+# This is a real, realistic-scale scenario (8 nodes, 8 channels, a 67-month
+# history + 24-month forecast horizon) -- generating it takes on the order
+# of a couple of minutes (no numpy; see engine/testing/synthetic.py's
+# module docstring on that tradeoff), and produces on the order of half a
+# million subscription events. It is not part of the automated test suite
+# for that reason -- run it manually:
 #
 #   uv run python -m engine.testing.synthetic \
-#       --base synthetic/base_portfolio.yaml \
-#       --out fixtures/base_portfolio
+#       --base synthetic/base_portfolio.yaml --out fixtures/base_portfolio
 #
-# writes fixtures/base_portfolio/{raw_order_event,raw_subscription_event,
-# raw_base_snapshot,raw_order_book_snapshot}.json plus a copy of this file
-# for provenance.
+# Three adjustments from how this scenario was first drafted, kept here so
+# the reasoning is visible rather than silently baked in:
 #
-# This mirrors engine/tests/golden_synthetic_scenario.py's PINNED_PARAMS,
-# so the two should produce identical data -- it exists as a runnable,
-# documented starting point, not a second independent scenario. See
-# engine/testing/config.py's docstrings for the full schema each section
-# accepts (constant vs. tenure-tabled hazards, "uniform" shorthands, etc).
+#   1. Three `seasonality` blocks below use YAML flow-mapping braces
+#      (`{ jan: 1.04, feb: 1.02, ... }`) -- a bare `key: v, key: v` block
+#      mapping isn't valid YAML.
+#   2. `pipeline.complexity_flags` probabilities are zeroed and
+#      `pipeline.amendments.enabled` is false, with `pipeline.calendar_effects`
+#      removed entirely: none of the three are implemented yet (Stage 2 --
+#      see engine/testing/config.py's module docstring for scope). Turning
+#      any of them on raises SchemaNotImplementedError rather than silently
+#      generating data that doesn't reflect what the config asks for.
+#   3. `fttc_copper_retirement_wave_1`'s migration volumes are scaled down
+#      from the original draft (which moved ~5,700 subscribers over 4
+#      months): fttc_40_10's own declining acquisition trend means its
+#      simulated base by 2026 is smaller than that draft assumed, and the
+#      larger figures drove the base negative -- caught by this config's
+#      own `self_check` gates doing exactly their job. The scaled figures
+#      leave headroom against the base engine/testing/synthetic.py actually
+#      produces from this scenario's acquisition parameters.
+#
+# `output.format: parquet` and the `fact_regressor` table aren't
+# implemented (JSON only; see engine/testing/cli.py). Everything else below
+# -- hierarchies, acquisition, regrade, churn, pipeline, regressors,
+# migrations, pathologies, self_check -- is implemented as written.
+# =============================================================================
 
-horizon: 24
-seed: 20260101
+meta:
+  name: base_portfolio
+  seed: 20260825
+  period_grain: month
 
-# Leaf ids are generated deterministically as pg{g}-p{p}-v{v} / cg{g}-c{c}-s{s}.
-# With the shape below: nodes pg0-p0-v0, pg0-p0-v1; channels cg0-c0-s0, cg0-c0-s1.
+  # History long enough that the OLDEST raise cohorts are fully matured.
+  # Rule: history >= max_cycle_time + 24 months. P99 cycle here is ~4 months,
+  # so 67 months is comfortable.
+  history_start: 2021-01
+  history_end: 2026-07
+
+  # Orders raised before this date but not yet closed form the opening book.
+  # Cohorts near this date are RIGHT-CENSORED by construction — this is the
+  # single most important property of the fixture.
+  book_snapshot_date: 2026-07-31
+
+  forecast_horizon_months: 24
+
+# =============================================================================
+# HIERARCHIES
+# =============================================================================
+
 product_hierarchy:
-  groups: 1
-  products_per_group: 1
-  variants_per_product: 2
+  - group: business_broadband
+    products:
+      - product: fttc
+        variants:
+          - { node: fttc_40_10,  launch: 2018-01, retire: 2027-06 }
+          - { node: fttc_80_20,  launch: 2018-01, retire: 2027-06 }
+      - product: fttp
+        variants:
+          - { node: fttp_150,    launch: 2021-01 }
+          - { node: fttp_500,    launch: 2021-06 }
+          - { node: fttp_1000,   launch: 2023-03 }
+      - product: converged
+        variants:
+          # Exercises cross-PRODUCT regrade within a group. To exercise
+          # cross-GROUP regrade, add a path into business_voice in
+          # regrade.transitions and check invariant 3 still holds.
+          - { node: bundle_fttp_voice, launch: 2022-09 }
+
+  - group: business_voice
+    products:
+      - product: cloud_voice
+        variants:
+          - { node: cv_essential, launch: 2019-04 }
+          - { node: cv_pro,       launch: 2019-04 }
 
 channel_hierarchy:
-  groups: 1
-  channels_per_group: 1
-  sub_channels_per_channel: 2
+  - group: direct
+    channels:
+      - { channel: digital_self_serve,  launch: 2021-01 }
+      - { channel: telesales_inbound,   launch: 2021-01 }
+      - { channel: telesales_outbound,  launch: 2021-01 }
+      - { channel: field_sales,         launch: 2021-01 }
+  - group: indirect
+    channels:
+      - { channel: partner_reseller,    launch: 2021-01 }
+      - { channel: partner_agent,       launch: 2022-04 }   # mid-history launch
+  - group: retention
+    channels:
+      # Retention channels raise almost no acquisitions; they carry regrades.
+      - { channel: retention_outbound,  launch: 2021-01 }
+      - { channel: digital_renewal,     launch: 2021-11 }
 
-# Mean acquisition raises per period, per (node, channel) pair.
-acquisition_rate:
-  default: "6"
-  overrides: []
+contract_terms: [12, 24, 36]
 
-contract_terms:
-  - term: monthly
-    weight: "0.7"
-  - term: annual
-    weight: "0.3"
+# =============================================================================
+# RAISED ACQUISITIONS  (exogenous — a LEVEL process, per node x channel)
+# =============================================================================
 
-# P(destination | source, a regrade happens). "uniform" spreads a regrade
-# evenly across every node (including staying put, i.e. a contract
-# extension with no node change).
-regrade_transition: uniform
+acquisition:
+  defaults:
+    process: negative_binomial          # count process; dispersion = overdispersion
+    dispersion: 0.18
+    trend_pct_per_month: 0.0
+    seasonality: { jan: 1.04, feb: 1.02, mar: 1.14, apr: 0.96, may: 0.98, jun: 1.02, jul: 0.92, aug: 0.84, sep: 1.12, oct: 1.06, nov: 1.02, dec: 0.88 }
+    working_day_elasticity: 0.65        # response to working days vs period mean
+    price_elasticity: -1.30             # on own relative price index
+    marketing_elasticity: 0.22          # on log marketing spend
+    headcount_elasticity: 0.80          # field/telesales only; see per-channel
 
-regrade_hazard:
-  monthly: "0.02"
-  annual: "0.02"
+  # Total raised acquisitions per node at history_start, before channel split.
+  nodes:
+    fttc_40_10:        { level: 420,  trend_pct_per_month: -1.8 }
+    fttc_80_20:        { level: 2850, trend_pct_per_month: -1.2 }
+    fttp_150:          { level: 640,  trend_pct_per_month:  1.9 }
+    fttp_500:          { level: 310,  trend_pct_per_month:  3.4, dispersion: 0.24 }
+    fttp_1000:         { level: 40,   trend_pct_per_month:  4.1, dispersion: 0.40 }
+    bundle_fttp_voice: { level: 95,   trend_pct_per_month:  2.6 }
+    cv_essential:      { level: 780,  trend_pct_per_month:  0.4 }
+    cv_pro:            { level: 240,  trend_pct_per_month:  1.1 }
 
-# Tenure-dependent example: no one churns in their acquisition period
-# (tenure 0 is structurally unobservable in this discrete model anyway --
-# see engine/estimate.py's estimate_churn_hazard docstring), monthly
-# subscribers settle at a 5%/period hazard from tenure 1 on, annual at 2%.
-churn_hazard:
-  monthly:
-    default: "0.05"
-    by_tenure:
-      0: "0.0"
-  annual:
-    default: "0.02"
-    by_tenure:
-      0: "0.0"
+  # Channel mix per node. Shares must sum to 1.0 at every period.
+  # `drift_pct_per_month` is applied on the log-ratio scale then renormalised,
+  # so the compositional constraint holds exactly. This is what the compositional
+  # channel-mix forecaster in Prompt 5 has to recover.
+  channel_mix:
+    defaults:
+      digital_self_serve:  { share: 0.22, drift_pct_per_month:  0.9 }
+      telesales_inbound:   { share: 0.19, drift_pct_per_month: -0.2 }
+      telesales_outbound:  { share: 0.14, drift_pct_per_month: -0.5 }
+      field_sales:         { share: 0.15, drift_pct_per_month: -0.3 }
+      partner_reseller:    { share: 0.26, drift_pct_per_month: -0.1 }
+      partner_agent:       { share: 0.04, drift_pct_per_month:  1.4 }
+      retention_outbound:  { share: 0.00 }
+      digital_renewal:     { share: 0.00 }
+    overrides:
+      # High-value / install-heavy products skew away from digital.
+      fttp_1000:
+        digital_self_serve: { share: 0.06 }
+        field_sales:        { share: 0.38 }
+        partner_reseller:   { share: 0.31 }
+      bundle_fttp_voice:
+        digital_self_serve: { share: 0.04 }
+        field_sales:        { share: 0.42 }
+      fttc_40_10:
+        digital_self_serve: { share: 0.34 }
+        field_sales:        { share: 0.05 }
 
-# g(k): P(an order raised in period s closes in period s+k). breakage is
-# the residual probability it never closes. Must sum to exactly 1 per
-# txn_type; applied to every channel.
-closure:
-  acquisition:
-    g: ["0.5", "0.3", "0.1"]
-    breakage: "0.1"
-  regrade:
-    g: ["0.6", "0.2"]
-    breakage: "0.2"
-  churn:
-    g: ["0.8"]
-    breakage: "0.2"
+  contract_term_mix:
+    defaults:      { 12: 0.15, 24: 0.55, 36: 0.30 }
+    by_channel:
+      digital_self_serve: { 12: 0.31, 24: 0.55, 36: 0.14 }
+      field_sales:        { 12: 0.06, 24: 0.44, 36: 0.50 }
+      partner_reseller:   { 12: 0.08, 24: 0.47, 36: 0.45 }
 
-# Relative weight used when sampling which channel raises a regrade/churn
-# order (acquisitions use acquisition_rate's node x channel grain
-# directly). "uniform" gives every channel equal weight.
-order_channel_weight: uniform
+# =============================================================================
+# RAISED REGRADES  (endogenous — a RATE on the opening base)
+# =============================================================================
 
-# Optional sections -- omit any of these entirely for "none".
-initial_base: {}
-channel_launch_period: {}
-structural_break: null
+regrade:
+  # Monthly probability that a subscription raises a regrade order.
+  # Contract expiry dominates: this is the signal an aggregate model can't see
+  # and the cohort engine can.
+  hazard:
+    base_monthly_rate: 0.004            # background, in-contract
+    expiry_window_months: [-2, 0, 1, 2] # relative to contract end
+    expiry_window_rate: 0.145           # per month inside the window
+    out_of_contract_rate: 0.021         # after the window, rolling
+    seasonality: { jan: 1.10, feb: 1.05, mar: 1.20, apr: 0.95, may: 0.95, jun: 1.00, jul: 0.85, aug: 0.75, sep: 1.15, oct: 1.10, nov: 1.05, dec: 0.75 }
+    by_acquisition_channel:             # multiplier on the hazard
+      partner_reseller: 1.35
+      partner_agent:    1.30
+      field_sales:      0.85
+
+  # Which channel RAISES the regrade order (order_channel), conditional on a
+  # regrade happening. Distinct from acquisition_channel, which stays sticky.
+  order_channel_mix:
+    retention_outbound:  { share: 0.44, drift_pct_per_month: -1.1 }
+    digital_renewal:     { share: 0.21, drift_pct_per_month:  2.2 }
+    telesales_inbound:   { share: 0.16 }
+    field_sales:         { share: 0.11 }
+    partner_reseller:    { share: 0.08 }
+
+  # Destination given a regrade. `_extend_same` = contract extension only,
+  # which RE-COHORTS the subscription at months_elapsed = 0 without moving node.
+  # Rows must sum to 1.0.
+  transitions:
+    fttc_40_10:
+      { _extend_same: 0.42, fttc_80_20: 0.31, fttp_150: 0.19, fttp_500: 0.08 }
+    fttc_80_20:
+      { _extend_same: 0.46, fttp_150: 0.18, fttp_500: 0.24, fttp_1000: 0.03,
+        bundle_fttp_voice: 0.06, fttc_40_10: 0.03 }
+    fttp_150:
+      { _extend_same: 0.71, fttp_500: 0.21, fttp_1000: 0.04, bundle_fttp_voice: 0.04 }
+    fttp_500:
+      { _extend_same: 0.79, fttp_1000: 0.11, fttp_150: 0.04, bundle_fttp_voice: 0.06 }
+    fttp_1000:
+      { _extend_same: 0.88, fttp_500: 0.08, bundle_fttp_voice: 0.04 }
+    bundle_fttp_voice:
+      { _extend_same: 0.91, fttp_500: 0.06, fttp_1000: 0.03 }
+    cv_essential:
+      { _extend_same: 0.74, cv_pro: 0.26 }
+    cv_pro:
+      { _extend_same: 0.89, cv_essential: 0.11 }
+
+  # Fraction of node-moving regrades that ALSO extend the contract (re-cohort).
+  # The remainder move node but keep the tenure clock running.
+  extension_with_move_rate: 0.82
+
+# =============================================================================
+# CHURN  (rate on opening base — no order pipeline, immediate effect)
+# =============================================================================
+
+churn:
+  hazard:
+    in_contract_monthly: 0.0035
+    expiry_window_months: [0, 1, 2, 3]
+    expiry_window_monthly: 0.038        # the expiry spike
+    out_of_contract_monthly: 0.0225
+    early_life_multiplier:              # months_elapsed -> multiplier
+      { 0: 1.9, 1: 1.6, 2: 1.3, 3: 1.1 }
+    seasonality: { jan: 1.15, feb: 1.05, mar: 1.10, apr: 1.00, may: 0.95, jun: 0.95, jul: 0.90, aug: 0.85, sep: 1.05, oct: 1.05, nov: 1.00, dec: 0.95 }
+    by_acquisition_channel:
+      digital_self_serve: 1.22
+      partner_reseller:   1.45
+      partner_agent:      1.60
+      field_sales:        0.72
+      telesales_outbound: 1.18
+    by_node:
+      fttc_40_10: 1.30
+      fttc_80_20: 1.10
+      fttp_1000:  0.80
+      bundle_fttp_voice: 0.65
+
+# =============================================================================
+# ORDER PIPELINE  —  the closure kernel ground truth
+# =============================================================================
+
+pipeline:
+  max_order_age_periods: 8              # K_max; anything older is force-broken
+
+  # Cycle time is specified in DAYS and bucketed to periods by the simulator,
+  # so a large share lands at k=0 (same-period raise and close). That is
+  # realistic on a monthly grain and it is exactly what the kernel estimator
+  # must handle — a kernel that can't represent k=0 will be badly wrong.
+  #
+  # `break_timing: early` means most breakage happens in the first 1-2 periods
+  # (credit fail, cooling-off), `spread` means it accumulates with age
+  # (provisioning failure, site issues).
+
+  defaults:
+    cycle_time: { distribution: lognormal, median_days: 14, p90_days: 42 }
+    breakage_rate: 0.09
+    break_timing: early
+
+  by_order_type:
+    acquisition: {}
+    regrade:
+      cycle_time: { distribution: lognormal, median_days: 6, p90_days: 21 }
+      breakage_rate: 0.055
+    migration:
+      # Migrations bypass the pipeline entirely; present only so a test can
+      # assert that they do.
+      bypass_pipeline: true
+
+  by_channel:
+    digital_self_serve:
+      cycle_time: { distribution: lognormal, median_days: 2, p90_days: 9 }
+      breakage_rate: 0.042
+    digital_renewal:
+      cycle_time: { distribution: lognormal, median_days: 1, p90_days: 4 }
+      breakage_rate: 0.021
+    telesales_inbound:
+      cycle_time: { distribution: lognormal, median_days: 9, p90_days: 26 }
+      breakage_rate: 0.075
+    telesales_outbound:
+      cycle_time: { distribution: lognormal, median_days: 12, p90_days: 34 }
+      breakage_rate: 0.115
+    field_sales:
+      cycle_time: { distribution: lognormal, median_days: 21, p90_days: 58 }
+      breakage_rate: 0.105
+    partner_reseller:
+      cycle_time: { distribution: lognormal, median_days: 26, p90_days: 71 }
+      breakage_rate: 0.142
+      break_timing: spread
+    partner_agent:
+      cycle_time: { distribution: lognormal, median_days: 29, p90_days: 84 }
+      breakage_rate: 0.168
+      break_timing: spread
+    retention_outbound:
+      cycle_time: { distribution: lognormal, median_days: 4, p90_days: 15 }
+      breakage_rate: 0.048
+
+  by_product:                           # multiplicative on cycle time
+    fttp:      { cycle_time_multiplier: 1.55, breakage_multiplier: 1.20 }
+    converged: { cycle_time_multiplier: 1.80, breakage_multiplier: 1.35 }
+    fttc:      { cycle_time_multiplier: 1.00, breakage_multiplier: 1.00 }
+    cloud_voice: { cycle_time_multiplier: 0.60, breakage_multiplier: 0.85 }
+
+  # complexity_flags, calendar_effects, and amendments are Stage-2 (not yet
+  # implemented) -- neutralized here so this example config runs to
+  # completion; see engine/testing/config.py's module docstring.
+  complexity_flags:
+    new_site: { probability: 0.0, cycle_time_multiplier: 1.70, breakage_multiplier: 1.55 }
+    engineering_visit_required: { probability: 0.0, cycle_time_multiplier: 1.45, breakage_multiplier: 1.25 }
+    number_port: { probability: 0.0, cycle_time_multiplier: 1.30, breakage_multiplier: 1.15 }
+    credit_check_referred: { probability: 0.0, cycle_time_multiplier: 1.20, breakage_multiplier: 3.10 }
+
+  amendments:
+    enabled: false
+    overall_rate: 0.031
+    matrix:
+      fttp_500:   { fttp_150: 0.55, fttp_1000: 0.45 }
+      fttp_1000:  { fttp_500: 0.80, fttp_150: 0.20 }
+      fttc_80_20: { fttc_40_10: 0.70, fttp_150: 0.30 }
+
+  # Off by default. Switch on in the capacity_constraint scenario.
+  capacity:
+    enabled: false
+    pools:
+      engineering_visits:
+        applies_to_flags: [engineering_visit_required]
+        monthly_ceiling: 2600
+
+# =============================================================================
+# REGRESSORS  (historical actuals + forward values for the horizon)
+# =============================================================================
+
+regressors:
+  working_days:
+    type: derived_calendar
+
+  relative_price_index:
+    type: series_by_node
+    baseline: 1.0
+    # Step changes; the acquisition price_elasticity acts on these.
+    events:
+      - { node: fttc_80_20, period: 2022-04, multiplier: 1.079 }   # CPI+3.9%
+      - { node: fttc_80_20, period: 2023-04, multiplier: 1.146 }
+      - { node: fttc_80_20, period: 2024-04, multiplier: 1.079 }
+      - { node: fttc_80_20, period: 2025-04, multiplier: 1.052 }
+      - { node: fttc_80_20, period: 2026-04, multiplier: 1.049 }
+      - { node: fttp_500,   period: 2024-09, multiplier: 0.91 }    # promo reprice
+      - { node: fttp_1000,  period: 2025-03, multiplier: 0.88 }
+    forward:
+      - { node: "*", period: 2027-04, multiplier: 1.048 }
+
+  marketing_spend:
+    type: series_by_channel
+    unit: gbp_thousands_per_month
+    baseline:
+      digital_self_serve: 340
+      telesales_inbound:  95
+      partner_reseller:   60
+    seasonality: { sep: 1.45, jan: 1.30, aug: 0.55, dec: 0.50 }
+    forward_assumption: flat_at_last_12m_mean
+
+  sales_headcount:
+    type: series_by_channel
+    baseline: { field_sales: 118, telesales_outbound: 84, retention_outbound: 61 }
+    events:
+      - { channel: field_sales, period: 2023-07, level: 96 }       # restructure
+      - { channel: retention_outbound, period: 2025-02, level: 78 }
+    forward_assumption: hold_last
+
+  contracts_expiring:
+    # NOT a free regressor — the simulator derives it from the cohort state.
+    # Listed here so tests can assert the engine derives the same series.
+    type: derived_from_cohorts
+
+  campaign_flags:
+    type: event_dummies
+    events:
+      - { name: spring_fibre_push, periods: [2024-03, 2024-04], channels: [digital_self_serve, telesales_inbound], raise_multiplier: 1.32 }
+      - { name: partner_incentive, periods: [2025-09, 2025-10, 2025-11], channels: [partner_reseller, partner_agent], raise_multiplier: 1.48 }
+
+# =============================================================================
+# MIGRATIONS  (overlay-driven, bypass the pipeline, must net to zero)
+# =============================================================================
+
+migrations:
+  - name: fttc_copper_retirement_wave_1
+    from_node: fttc_40_10
+    to_node: fttp_150
+    schedule:
+      2026-01: 300
+      2026-02: 450
+      2026-03: 450
+      2026-04: 225
+    paired: true
+  - name: legacy_voice_offportfolio
+    from_node: cv_essential
+    to_node: null                       # leaves the portfolio
+    schedule: { 2025-06: 340, 2025-07: 340 }
+    paired: false
+    off_portfolio_reason: "migrated to third-party platform"
+
+# =============================================================================
+# DATA QUALITY PATHOLOGIES  (off here; scenarios switch them on)
+# =============================================================================
+
+pathologies:
+  orphan_orders:
+    closed_with_no_base_movement_rate: 0.0
+    base_movement_with_no_order_rate: 0.0
+  backdated_events:
+    rate: 0.0
+    max_periods_back: 2
+  status_flapping:
+    rate: 0.0                           # close -> reopen -> close
+  bulk_closure_batch:
+    enabled: false
+  zombie_orders:
+    rate: 0.0                           # never close, never break
+  structural_break:
+    enabled: false
+  duplicate_orders:
+    rate: 0.0
+
+# =============================================================================
+# OUTPUT
+# =============================================================================
+
+output:
+  path: ./fixtures/base_portfolio
+  format: parquet
+  tables:
+    - raw_order_event
+    - raw_subscription_event
+    - raw_base_snapshot
+    - raw_order_book_snapshot
+    - fact_regressor
+    - dim_product
+    - dim_channel
+
+  # Ground truth, written alongside the data. These are what the parameter
+  # recovery tests assert against — never regenerate them from the data itself.
+  truth:
+    - closure_kernel_g_k          # by channel x order_type x product x flags
+    - breakage_rate_by_segment
+    - regrade_transition_matrix
+    - churn_hazard_by_tenure_term_channel
+    - regrade_hazard_by_tenure_term
+    - channel_mix_by_node_period
+    - acquisition_level_by_node_channel_period
+    - amendment_matrix
+    - migration_schedule
+
+  # Sanity gates the simulator must pass before writing anything. If the
+  # generator can't produce data satisfying the invariants, no test built on
+  # it means anything.
+  self_check:
+    assert_order_book_identity: true
+    assert_base_identity: true
+    assert_resign_conservation: true
+    assert_kernel_sums_to_one: true
+    assert_non_negative_base: true
+    assert_migrations_net_zero_when_paired: true
