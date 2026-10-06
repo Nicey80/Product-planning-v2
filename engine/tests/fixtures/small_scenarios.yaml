@@ -1,0 +1,31 @@
+# Minimal scenarios.yaml paired with tests/fixtures/small_portfolio.yaml,
+# exercising the dotted-path patch mechanics (dict-leaf replace, list
+# indexing, and an unknown-section error path) without needing the real
+# synthetic/scenarios.yaml's base_portfolio.yaml-specific node/channel names.
+
+scenarios:
+
+  bump_n0:
+    description: >
+      Dict-path patching: replaces a single leaf (acquisition.nodes.n0.level)
+      and a sibling pipeline knob, leaving everything else untouched.
+    patch:
+      meta.name: bump_n0
+      acquisition.nodes.n0.level: 35
+      pipeline.max_order_age_periods: 6
+
+  late_launch_n1:
+    description: >
+      List-index patching: sets a launch date on the second product
+      variant (n1) via a numeric path segment.
+    patch:
+      meta.name: late_launch_n1
+      product_hierarchy.0.products.0.variants.1.launch: 2024-05
+
+  turn_on_capacity:
+    description: >
+      Touches a still-deferred section (pipeline.capacity.enabled) --
+      should surface SchemaNotImplementedError, not silently no-op.
+    patch:
+      meta.name: turn_on_capacity
+      pipeline.capacity.enabled: true

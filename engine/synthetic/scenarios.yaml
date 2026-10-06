@@ -1,0 +1,291 @@
+# =============================================================================
+# scenarios.yaml
+# Each scenario deep-merges onto base_portfolio.yaml. Run as:
+#   python -m engine.testing.synthetic --base base_portfolio.yaml \
+#          --scenario scenarios.yaml --name censoring_trap
+#
+# Every scenario names the assertion it exists to support. A scenario without
+# a failing-before / passing-after test is decoration.
+#
+# "Deep-merge" here means: each dotted path below (e.g.
+# "pipeline.defaults.cycle_time" or "product_hierarchy.0.products.1.variants.2.launch")
+# navigates into base_portfolio.yaml's nested dicts/lists and REPLACES
+# whatever sits at that exact leaf -- siblings and everything elsewhere in
+# the config are left untouched. See engine/testing/config.py's
+# apply_scenario_patch for the exact mechanics.
+#
+# Known gaps (see each scenario's note below, and engine/testing/config.py's
+# module docstring for what's implemented):
+#   - fat_order_book, capacity_constraint, and breakage_shock's
+#     complexity_flags.credit_check_referred patch all enable Stage-2
+#     sections (pipeline.capacity, pipeline.complexity_flags) that raise
+#     SchemaNotImplementedError by design -- not runnable yet.
+#   - amendment_heavy sets overall_rate/matrix but never flips
+#     pipeline.amendments.enabled -- as written it runs but has NO effect
+#     (amendments stay off); add `pipeline.amendments.enabled: true` to its
+#     patch once amendments are implemented.
+#   - dirty_data's bulk_closure_batch.{period,volume,drawn_from_ages} keys
+#     aren't implemented -- bulk_closure_batch always targets the oldest
+#     still-open acquisition cohort, closed at the last observed period;
+#     setting those keys now raises SchemaNotImplementedError rather than
+#     silently doing something else.
+#   - breakage_shock and demand_break's structural_break patches use a
+#     richer (period/target/changes) shape than this loader implements
+#     (flat break_period/acquisition_multiplier/churn_multiplier only) --
+#     raises SchemaNotImplementedError rather than crashing obscurely.
+# =============================================================================
+
+scenarios:
+
+  # ---------------------------------------------------------------------------
+  # 1. THE CENSORING TRAP — the most important fixture in the suite
+  # ---------------------------------------------------------------------------
+  censoring_trap:
+    description: >
+      Long cycle times plus a recent book snapshot means the last few raise
+      cohorts are heavily incomplete. A naive closed/raised ratio shows
+      conversion collapsing; the truth is that it is flat.
+    asserts: >
+      Competing-risks kernel recovers true breakage within 1.5pp for cohorts
+      with <30% observed maturity. A naive ratio estimator must FAIL the same
+      assertion — test both and assert the naive one is biased low.
+    patch:
+      meta.name: censoring_trap
+      meta.book_snapshot_date: 2026-07-31
+      pipeline.defaults.cycle_time: { distribution: lognormal, median_days: 38, p90_days: 118 }
+      pipeline.by_channel.partner_reseller.cycle_time: { distribution: lognormal, median_days: 62, p90_days: 165 }
+      pipeline.max_order_age_periods: 10
+      acquisition.nodes.fttp_500.trend_pct_per_month: 6.5   # growing raises worsen the bias
+
+  # ---------------------------------------------------------------------------
+  # 2. BOOK-DOMINATED SHORT HORIZON
+  # ---------------------------------------------------------------------------
+  fat_order_book:
+    description: >
+      A large opening book with a long tail. The first three forecast periods
+      are almost entirely determined by orders already raised.
+    asserts: >
+      Book coverage of horizon months 1-3 exceeds 70%. P10-P90 interval on
+      closed volume is NARROWER in month 2 than month 8 — the inverted
+      uncertainty profile. A model that widens monotonically is wrong.
+    patch:
+      meta.name: fat_order_book
+      pipeline.defaults.cycle_time: { distribution: lognormal, median_days: 45, p90_days: 130 }
+      pipeline.capacity.enabled: true
+      pipeline.capacity.pools.engineering_visits.monthly_ceiling: 1400  # builds a backlog
+
+  # ---------------------------------------------------------------------------
+  # 3. CHANNEL MIX SHIFT
+  # ---------------------------------------------------------------------------
+  digital_shift:
+    description: >
+      Aggressive migration of regrades to digital renewal. Raised volumes are
+      unchanged, but closed volumes rise and arrive sooner because digital has
+      lower breakage and a much shorter cycle.
+    asserts: >
+      Closed volume rises >4% against base with raised volume held flat, purely
+      from mix. Proves the kernel responds to mix rather than applying a static
+      blended rate. Also exercises the compositional channel-mix forecaster.
+    patch:
+      meta.name: digital_shift
+      regrade.order_channel_mix.digital_renewal:    { share: 0.21, drift_pct_per_month: 6.5 }
+      regrade.order_channel_mix.retention_outbound: { share: 0.44, drift_pct_per_month: -4.8 }
+      acquisition.channel_mix.defaults.digital_self_serve: { share: 0.22, drift_pct_per_month: 3.2 }
+      acquisition.channel_mix.defaults.partner_reseller:   { share: 0.26, drift_pct_per_month: -2.4 }
+
+  # ---------------------------------------------------------------------------
+  # 4. BREAKAGE SHOCK
+  # ---------------------------------------------------------------------------
+  breakage_shock:
+    description: >
+      A credit policy tightening in 2025-11 raises referral rates and breakage
+      sharply on indirect channels. Cycle time is unchanged.
+    asserts: >
+      Kernel drift detection fires within two periods. Error decomposition
+      attributes the closed-volume miss to KERNEL error, not volume error,
+      when raised is held at actuals.
+    patch:
+      meta.name: breakage_shock
+      pipeline.complexity_flags.credit_check_referred.probability: 0.07
+      pathologies.structural_break:
+        enabled: true
+        period: 2025-11
+        target: pipeline.breakage
+        changes:
+          partner_reseller: { breakage_rate: 0.265 }
+          partner_agent:    { breakage_rate: 0.310 }
+          telesales_outbound: { breakage_rate: 0.190 }
+
+  # ---------------------------------------------------------------------------
+  # 5. CAPACITY CONSTRAINT
+  # ---------------------------------------------------------------------------
+  capacity_constraint:
+    description: >
+      A demand spike meets a hard engineering ceiling. Closures cannot keep up,
+      a queue forms, and the book ages beyond expected close.
+    asserts: >
+      Closures are capped at the ceiling; excess returns to the book and is
+      re-aged; the ceiling-bound flag is set on output. Ageing-quality metric
+      flags the excess. Without the ceiling, the model over-closes by >15%.
+    patch:
+      meta.name: capacity_constraint
+      pipeline.capacity.enabled: true
+      pipeline.capacity.pools.engineering_visits.monthly_ceiling: 1900
+      regressors.campaign_flags.events:
+        - { name: fibre_blitz, periods: [2026-03, 2026-04, 2026-05],
+            channels: [field_sales, partner_reseller, digital_self_serve],
+            raise_multiplier: 2.10 }
+
+  # ---------------------------------------------------------------------------
+  # 6. DIRTY DATA
+  # ---------------------------------------------------------------------------
+  dirty_data:
+    description: >
+      Everything that goes wrong in a real order feed, at once.
+    asserts: >
+      Reconciliation classifies each pathology into the right bucket, orphans
+      are reported separately by direction, the bulk batch is excluded from
+      kernel estimation, and the kernel estimate with cleansing is within 1pp
+      of the kernel estimate on clean data.
+    patch:
+      meta.name: dirty_data
+      pathologies.orphan_orders.closed_with_no_base_movement_rate: 0.008
+      pathologies.orphan_orders.base_movement_with_no_order_rate: 0.011
+      pathologies.backdated_events.rate: 0.024
+      pathologies.status_flapping.rate: 0.006
+      pathologies.zombie_orders.rate: 0.003
+      pathologies.duplicate_orders.rate: 0.002
+      pathologies.bulk_closure_batch:
+        enabled: true
+        period: 2024-08
+        volume: 4200
+        drawn_from_ages: [3, 4, 5, 6]   # clears a backlog, distorts cycle time
+
+  # ---------------------------------------------------------------------------
+  # 7. THIN AND NEW NODES
+  # ---------------------------------------------------------------------------
+  sparse_portfolio:
+    description: >
+      Very low-volume variants and a channel launched mid-history. Tests
+      hierarchical borrowing and the short-history model pool.
+    asserts: >
+      Thin nodes fall back to the restricted candidate pool; grouped
+      reconciliation still holds exactly; the kernel pools thin segments
+      towards their parent rather than fitting noise. No node produces a
+      negative base or a NaN.
+    patch:
+      meta.name: sparse_portfolio
+      acquisition.nodes.fttp_1000.level: 6
+      acquisition.nodes.bundle_fttp_voice.level: 11
+      product_hierarchy.0.products.1.variants.2.launch: 2025-09  # fttp_1000 late
+      channel_hierarchy.1.channels.1.launch: 2025-04             # partner_agent late
+
+  # ---------------------------------------------------------------------------
+  # 8. REGRADE EDGE CASES
+  # ---------------------------------------------------------------------------
+  regrade_collisions:
+    description: >
+      High regrade and high churn together, so many subscriptions churn while
+      holding an open regrade order.
+    asserts: >
+      Churn wins and the open order is force-broken. No regrade closes onto a
+      departed subscriber. Subscribers with open regrades remain in the base at
+      the SOURCE node and remain churn-exposed. Resign conservation holds.
+    patch:
+      meta.name: regrade_collisions
+      regrade.hazard.expiry_window_rate: 0.28
+      churn.hazard.expiry_window_monthly: 0.085
+      pipeline.by_order_type.regrade.cycle_time:
+        { distribution: lognormal, median_days: 34, p90_days: 88 }   # long overlap window
+
+  # ---------------------------------------------------------------------------
+  # 9. AMENDMENT-HEAVY
+  # ---------------------------------------------------------------------------
+  amendment_heavy:
+    description: >
+      Supply constraints on the top tier push a large share of orders to close
+      on a lower variant than raised.
+    asserts: >
+      Amendment matrix is recovered within tolerance. With amendments disabled,
+      leaf-level closed volumes are materially wrong while the product-level
+      total stays right — proving why leaf accuracy needs it and aggregate
+      accuracy hides it.
+    patch:
+      meta.name: amendment_heavy
+      pipeline.amendments.overall_rate: 0.135
+      pipeline.amendments.matrix.fttp_1000: { fttp_500: 0.92, fttp_150: 0.08 }
+
+  # ---------------------------------------------------------------------------
+  # 10. MIGRATION WAVE
+  # ---------------------------------------------------------------------------
+  migration_wave:
+    description: >
+      A large paired migration alongside a smaller off-portfolio one.
+    asserts: >
+      Migrations bypass the pipeline entirely — no breakage, no cycle-time lag.
+      Paired legs net to zero per period. The off-portfolio migration does NOT
+      net to zero and requires its explicit flag. Migration volumes never appear
+      in raised, book or broken.
+    patch:
+      meta.name: migration_wave
+      migrations:
+        - name: copper_retirement_full
+          from_node: fttc_40_10
+          to_node: fttp_150
+          schedule: { 2026-09: 3400, 2026-10: 4100, 2026-11: 4100, 2026-12: 2600 }
+          paired: true
+        - name: fttc_80_retirement
+          from_node: fttc_80_20
+          to_node: fttp_500
+          schedule: { 2027-01: 5200, 2027-02: 5200, 2027-03: 3900 }
+          paired: true
+        - name: legacy_voice_offportfolio
+          from_node: cv_essential
+          to_node: null
+          schedule: { 2026-11: 620 }
+          paired: false
+          off_portfolio_reason: "migrated to third-party platform"
+
+  # ---------------------------------------------------------------------------
+  # 11. STRUCTURAL BREAK IN DEMAND
+  # ---------------------------------------------------------------------------
+  demand_break:
+    description: >
+      A field sales restructure in 2023-07 permanently resets acquisition
+      levels on direct channels.
+    asserts: >
+      Structural break detection identifies the period; the training-window
+      recommendation improves backtest MASE against using full history.
+      Pre-break data must not be silently deleted.
+    patch:
+      meta.name: demand_break
+      pathologies.structural_break:
+        enabled: true
+        period: 2023-07
+        target: acquisition.level
+        changes:
+          field_sales: { multiplier: 0.58 }
+          telesales_outbound: { multiplier: 0.74 }
+          partner_reseller: { multiplier: 1.22 }   # volume displaced, not lost
+
+  # ---------------------------------------------------------------------------
+  # 12. GOLDEN — the frozen regression fixture
+  # ---------------------------------------------------------------------------
+  golden:
+    description: >
+      Small, fast, fully deterministic. This is the fixture behind the
+      committed golden forecast run. Keep it small enough to run in CI in
+      under 30 seconds.
+    asserts: >
+      Full engine output matches the committed golden file exactly. Any drift
+      fails CI. Regenerate only via the documented procedure, never casually.
+    patch:
+      meta.name: golden
+      meta.seed: 1
+      meta.history_start: 2023-01
+      meta.history_end: 2026-07
+      meta.forecast_horizon_months: 12
+      acquisition.defaults.dispersion: 0.0        # deterministic counts
+      pathologies: {}                             # clean data only
+      # Trim to one product and three channels — see README for the reduced
+      # hierarchy this scenario expects.

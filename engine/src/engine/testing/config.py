@@ -29,10 +29,19 @@ silently ignoring config that would otherwise change the ground truth.
 implemented: breakage is always recognized at raise time (age 0),
 matching engine.kernel's existing, unchanged convention -- changing that
 would mean changing engine/kernel.py itself, which this module never does.
+
+Scenarios (synthetic/scenarios.yaml, loaded via load_params_with_scenario
+and the CLI's --scenario/--name) deep-merge a named, dotted-path patch
+onto a base config before resolving it -- see apply_scenario_patch for the
+merge semantics and scenarios.yaml's own header for which scenarios hit a
+still-deferred section (and so still raise SchemaNotImplementedError) or
+a richer-than-implemented shape (structural_break's target/changes,
+bulk_closure_batch's period/volume/drawn_from_ages).
 """
 
 from __future__ import annotations
 
+import copy
 import math
 import random
 from collections.abc import Mapping, Sequence
@@ -86,6 +95,62 @@ class SchemaNotImplementedError(NotImplementedError):
 def load_params(path: Path | str) -> SyntheticParams:
     raw = yaml.safe_load(Path(path).read_text())
     return params_from_dict(raw)
+
+
+def load_params_with_scenario(
+    base_path: Path | str, scenario_path: Path | str, scenario_name: str
+) -> tuple[SyntheticParams, dict[str, Any]]:
+    """Loads `base_path`'s config, applies the named scenario's patch from
+    `scenario_path` (see apply_scenario_patch), and returns both the
+    resolved SyntheticParams and the merged raw config dict -- the CLI
+    writes the latter as params.yaml's provenance copy when a scenario is
+    applied, since the untouched base file no longer describes what was
+    actually run."""
+    raw = yaml.safe_load(Path(base_path).read_text())
+    patch = load_scenario_patch(scenario_path, scenario_name)
+    merged = apply_scenario_patch(raw, patch)
+    return params_from_dict(merged), merged
+
+
+def load_scenario_patch(path: Path | str, name: str) -> dict[str, Any]:
+    """Loads a scenarios.yaml file (see synthetic/scenarios.yaml) and
+    returns the named scenario's `patch` mapping: dotted-path -> value,
+    e.g. {"pipeline.max_order_age_periods": 10}."""
+    raw = yaml.safe_load(Path(path).read_text())
+    scenarios = raw.get("scenarios", {})
+    if name not in scenarios:
+        available = ", ".join(sorted(scenarios)) or "(none defined)"
+        raise KeyError(f"no scenario named {name!r} in {path} -- available: {available}")
+    return dict(scenarios[name].get("patch", {}))
+
+
+def apply_scenario_patch(raw: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    """Applies a scenario's dotted-path patch onto a deep copy of `raw` (a
+    config's parsed YAML). Each dotted path (e.g.
+    "pipeline.defaults.cycle_time" or
+    "product_hierarchy.0.products.1.variants.2.launch") navigates into
+    nested dicts/lists -- a numeric segment indexes into a list, creating
+    intermediate dicts if a dict segment is missing -- and REPLACES
+    whatever sits at that exact leaf wholesale. This is "deep merge" only
+    in the sense that every path *not* named in the patch is left
+    untouched; a dict value given in the patch does not get merged into
+    whatever dict was already at that leaf, it replaces it outright."""
+    merged = copy.deepcopy(dict(raw))
+    for dotted_path, value in patch.items():
+        _set_patch_path(merged, dotted_path.split("."), value)
+    return merged
+
+
+def _set_patch_path(container: Any, segments: Sequence[str], value: Any) -> None:
+    key = segments[0]
+    if len(segments) == 1:
+        if isinstance(container, list):
+            container[int(key)] = value
+        else:
+            container[key] = value
+        return
+    child = container[int(key)] if isinstance(container, list) else container.setdefault(key, {})
+    _set_patch_path(child, segments[1:], value)
 
 
 def params_from_dict(raw: Mapping[str, Any]) -> SyntheticParams:
@@ -844,10 +909,28 @@ def _resolve_pathology_rates(raw: Mapping[str, Any]) -> PathologyRates:
         backdated_rate=Decimal(str(backdated.get("rate", "0"))),
         backdated_max_periods_back=int(backdated.get("max_periods_back", 0)),
         status_flapping_rate=Decimal(str(status_flapping.get("rate", "0"))),
-        bulk_closure_batch_enabled=bool(bulk_closure.get("enabled", False)),
+        bulk_closure_batch_enabled=_resolve_bulk_closure_batch_enabled(bulk_closure),
         zombie_orders_rate=Decimal(str(zombie.get("rate", "0"))),
         duplicate_orders_rate=Decimal(str(duplicate.get("rate", "0"))),
     )
+
+
+def _resolve_bulk_closure_batch_enabled(raw: Mapping[str, Any]) -> bool:
+    """pathologies.bulk_closure_batch always targets the oldest still-open
+    acquisition cohort, closed at the last observed period (see
+    apply_pathology_rates in pathologies.py) -- period/volume/
+    drawn_from_ages overrides of that aren't implemented. Rather than
+    silently ignoring them while still running the batch with the
+    hardcoded target, raise if any are set."""
+    enabled = bool(raw.get("enabled", False))
+    unsupported = sorted(set(raw) - {"enabled"})
+    if enabled and unsupported:
+        raise SchemaNotImplementedError(
+            f"pathologies.bulk_closure_batch.{unsupported} not implemented -- "
+            "bulk_closure_batch always closes the oldest still-open acquisition cohort "
+            "at the last observed period; remove these keys to run with that behavior"
+        )
+    return enabled
 
 
 def _resolve_self_check(raw: Mapping[str, Any]) -> SelfCheckConfig:
@@ -878,6 +961,12 @@ def _resolve_self_check(raw: Mapping[str, Any]) -> SelfCheckConfig:
 def _resolve_structural_break(raw: Mapping[str, Any]) -> StructuralBreak | None:
     if not raw.get("enabled", False):
         return None
+    if "target" in raw or "changes" in raw:
+        raise SchemaNotImplementedError(
+            "pathologies.structural_break with a 'target'/'changes' shape (per-channel or "
+            "per-node breakage/acquisition-level overrides) is not implemented yet -- only "
+            "the flat break_period/acquisition_multiplier/churn_multiplier shape is"
+        )
     return StructuralBreak(
         break_period=int(raw["break_period"]),
         acquisition_multiplier=Decimal(str(raw.get("acquisition_multiplier", "1"))),
