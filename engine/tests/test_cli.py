@@ -20,12 +20,20 @@ from typing import Any
 import pytest
 import yaml
 
-from engine.domain import TxnType
+from engine.domain import NodeId, Period, TxnType
 from engine.testing.cli import main
-from engine.testing.config import SchemaNotImplementedError, load_params, params_from_dict
+from engine.testing.config import (
+    SchemaNotImplementedError,
+    apply_scenario_patch,
+    load_params,
+    load_params_with_scenario,
+    load_scenario_patch,
+    params_from_dict,
+)
 from engine.testing.synthetic import generate_portfolio
 
 _SAMPLE_CONFIG = Path(__file__).parent / "fixtures" / "small_portfolio.yaml"
+_SAMPLE_SCENARIOS = Path(__file__).parent / "fixtures" / "small_scenarios.yaml"
 
 
 def _raw_config() -> dict[str, Any]:
@@ -170,3 +178,115 @@ def test_cli_is_deterministic_given_same_seed(tmp_path: Path) -> None:
 
     for name in ("raw_order_event.json", "raw_subscription_event.json"):
         assert (out_a / name).read_text() == (out_b / name).read_text()
+
+
+# ---------------------------------------------------------------------------
+# --scenario / --name: deep-merging a named scenarios.yaml patch onto --base
+# ---------------------------------------------------------------------------
+
+
+def test_load_scenario_patch_returns_named_patch() -> None:
+    patch = load_scenario_patch(_SAMPLE_SCENARIOS, "bump_n0")
+    assert patch["acquisition.nodes.n0.level"] == 35
+    assert patch["pipeline.max_order_age_periods"] == 6
+
+
+def test_load_scenario_patch_unknown_name_raises() -> None:
+    with pytest.raises(KeyError, match="bump_n0"):
+        load_scenario_patch(_SAMPLE_SCENARIOS, "does-not-exist")
+
+
+def test_apply_scenario_patch_replaces_leaf_without_disturbing_siblings() -> None:
+    raw = _raw_config()
+    patch = load_scenario_patch(_SAMPLE_SCENARIOS, "bump_n0")
+    merged = apply_scenario_patch(raw, patch)
+
+    assert merged["acquisition"]["nodes"]["n0"]["level"] == 35
+    assert merged["pipeline"]["max_order_age_periods"] == 6
+    # untouched siblings/sections are preserved exactly
+    assert merged["acquisition"]["nodes"]["n1"] == raw["acquisition"]["nodes"]["n1"]
+    assert merged["pipeline"]["defaults"] == raw["pipeline"]["defaults"]
+    # the original dict passed in is never mutated
+    assert raw["acquisition"]["nodes"]["n0"]["level"] == 20
+
+
+def test_apply_scenario_patch_indexes_into_lists() -> None:
+    raw = _raw_config()
+    patch = load_scenario_patch(_SAMPLE_SCENARIOS, "late_launch_n1")
+    merged = apply_scenario_patch(raw, patch)
+
+    variants = merged["product_hierarchy"][0]["products"][0]["variants"]
+    assert variants[0] == {"node": "n0"}  # untouched sibling variant
+    assert variants[1] == {"node": "n1", "launch": "2024-05"}
+
+
+def test_load_params_with_scenario_resolves_patched_params() -> None:
+    params, merged = load_params_with_scenario(_SAMPLE_CONFIG, _SAMPLE_SCENARIOS, "bump_n0")
+
+    assert params.horizon == 8  # untouched
+    periods = sorted(params.acquisition[NodeId("n0")].mean_by_period)
+    assert params.acquisition[NodeId("n0")].mean_by_period[periods[0]] == Decimal("35")
+    assert merged["meta"]["name"] == "bump_n0"
+
+
+def test_load_params_with_scenario_late_launch_sets_node_launch_period() -> None:
+    params, _merged = load_params_with_scenario(_SAMPLE_CONFIG, _SAMPLE_SCENARIOS, "late_launch_n1")
+    assert params.node_launch_period[NodeId("n1")] == int(
+        Period(4)
+    )  # 2024-05, 4 months after 2024-01
+
+
+def test_load_params_with_scenario_deferred_section_raises() -> None:
+    with pytest.raises(SchemaNotImplementedError, match="capacity"):
+        load_params_with_scenario(_SAMPLE_CONFIG, _SAMPLE_SCENARIOS, "turn_on_capacity")
+
+
+def test_cli_scenario_and_name_must_be_given_together(tmp_path: Path) -> None:
+    out_dir = str(tmp_path / "out")
+    with pytest.raises(SystemExit):
+        main(
+            ["--base", str(_SAMPLE_CONFIG), "--scenario", str(_SAMPLE_SCENARIOS), "--out", out_dir]
+        )
+    with pytest.raises(SystemExit):
+        main(["--base", str(_SAMPLE_CONFIG), "--name", "bump_n0", "--out", out_dir])
+
+
+def test_cli_unknown_scenario_name_exits_cleanly(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--base",
+                str(_SAMPLE_CONFIG),
+                "--scenario",
+                str(_SAMPLE_SCENARIOS),
+                "--name",
+                "does-not-exist",
+                "--out",
+                str(tmp_path / "out"),
+            ]
+        )
+
+
+def test_cli_with_scenario_writes_merged_params_yaml(tmp_path: Path) -> None:
+    out_dir = tmp_path / "bump_n0"
+    main(
+        [
+            "--base",
+            str(_SAMPLE_CONFIG),
+            "--scenario",
+            str(_SAMPLE_SCENARIOS),
+            "--name",
+            "bump_n0",
+            "--out",
+            str(out_dir),
+        ]
+    )
+
+    written = yaml.safe_load((out_dir / "params.yaml").read_text())
+    assert written["meta"]["name"] == "bump_n0"
+    assert written["acquisition"]["nodes"]["n0"]["level"] == 35
+    # the on-disk base config itself is untouched
+    assert yaml.safe_load(_SAMPLE_CONFIG.read_text())["acquisition"]["nodes"]["n0"]["level"] == 20
+
+    dim_product = json.loads((out_dir / "dim_product.json").read_text())
+    assert {row["node"] for row in dim_product} == {"n0", "n1"}
